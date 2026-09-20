@@ -1,0 +1,11 @@
+# Pinned 2026-09-20, Python 3.10, win64 + linux (python:3.10-slim).
+# Regenerate: pip install -r requirements.txt && pip freeze (keep direct deps only).
+grpcio==1.84.0
+grpcio-tools==1.84.0
+protobuf==7.36.2
+grpcio-health-checking==1.84.0
+opencv-python-headless==5.0.0.93
+numpy==2.2.6
+scipy==1.15.3
+pandas==2.3.3
+pytest==9.1.1

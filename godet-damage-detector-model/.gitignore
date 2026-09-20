@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+# Generated protobuf stubs (rebuilt by protoc; see README). Keep __init__.py.
+src/gen/inference_v2_pb2*.py
+# Runtime state snapshots (restart recovery; never committed).
+state/

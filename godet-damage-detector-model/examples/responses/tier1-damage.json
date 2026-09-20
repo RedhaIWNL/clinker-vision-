@@ -1,0 +1,27 @@
+{
+  "frame_id": "example-damage",
+  "frame": 2741,
+  "model_version": "498184ea+dev+thr-v1",
+  "detections": [
+    {
+      "observation_target": "GODET",
+      "fault_type": "DAMAGE",
+      "bounding_box": {
+        "x": 0.3806,
+        "y": 0.1158,
+        "width": 0.0536,
+        "height": 0.1697
+      }
+    }
+  ],
+  "scalar_measurements": {
+    "lit_L": 150.0,
+    "lit_R": 102.0,
+    "peak": 0.7525256276130676,
+    "dx": 2.0,
+    "dy": 2.0,
+    "slot": 0,
+    "status_code": 0
+  },
+  "status": "readable"
+}

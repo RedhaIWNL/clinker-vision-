@@ -1,0 +1,15 @@
+{
+  "kind": "damage",
+  "event_key": "DAMAGE:224:3",
+  "godet_id": 224,
+  "loop": 3,
+  "state": "pending",
+  "evidence_frame_id": "f-12345",
+  "payload": {
+    "lip_before": 126.0,
+    "lip_now": 79.0,
+    "drop": 47.0,
+    "status": "pending"
+  },
+  "model_version": "498184ea+dev+thr-v1"
+}

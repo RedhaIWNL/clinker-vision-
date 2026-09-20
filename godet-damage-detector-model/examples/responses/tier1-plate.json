@@ -1,0 +1,16 @@
+{
+  "frame_id": "example-plate",
+  "frame": 3844,
+  "model_version": "498184ea+dev+thr-v1",
+  "detections": [],
+  "scalar_measurements": {
+    "lit_L": 142.0,
+    "lit_R": 84.0,
+    "peak": 0.26357385516166687,
+    "dx": 0.0,
+    "dy": -5.0,
+    "slot": 70,
+    "status_code": 3
+  },
+  "status": "occluded"
+}

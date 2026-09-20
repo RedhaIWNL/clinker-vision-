@@ -1,0 +1,97 @@
+{
+  "bundle_format": 1,
+  "calibrated_from": "out/h00 + config/camera_1_night.json",
+  "roi": {
+    "x": 1023,
+    "y": 176,
+    "w": 144,
+    "h": 258
+  },
+  "gate": {
+    "x": 1408,
+    "y": 506,
+    "w": 96,
+    "h": 95
+  },
+  "period_s": 0.8,
+  "loop_slots": 1208,
+  "lines": {
+    "L": [
+      0.11247471084475322,
+      36.63868000152693
+    ],
+    "R": [
+      0.09909798915280205,
+      113.0372967461026
+    ]
+  },
+  "lip_thr": {
+    "L": 180.0,
+    "R": 172.0
+  },
+  "lit_rows": {
+    "L": [
+      76,
+      226
+    ],
+    "R": [
+      42,
+      178
+    ]
+  },
+  "normal_len": {
+    "L": 150,
+    "R": 136
+  },
+  "short_len": {
+    "L": 123,
+    "R": 112
+  },
+  "face_band": {
+    "y0": 75,
+    "y1": 170,
+    "half_w": 10
+  },
+  "core": {
+    "rows": [
+      40,
+      220
+    ],
+    "cols": [
+      30,
+      110
+    ]
+  },
+  "peak_readable": 0.35,
+  "thresholds_id": "thr-v1",
+  "rules": {
+    "hist_loops": 3,
+    "drop_rows": 25,
+    "broken_fill": 0.7,
+    "splay_rise": 1.0,
+    "slope_dev_l": 0.045,
+    "slope_dev_r": 0.04,
+    "barcode_search": 40,
+    "barcode_min_score": 0.6,
+    "barcode_min_margin": 0.2,
+    "population_alarm_frac": 0.05,
+    "template_lost_peak": 0.5,
+    "template_lost_window": 200,
+    "trigger_lost_per_min": 60
+  },
+  "constants": {
+    "gap_miss_s": 1.2,
+    "plate_bright": 6.0,
+    "face_resid_edge": 20.0,
+    "capture_min_sep": 12,
+    "capture_ramp_steps": 4,
+    "capture_step_max": 9,
+    "reorder_window": 64
+  },
+  "jpeg": {
+    "width": 2688,
+    "height": 1520,
+    "quality": "pipeline-pinned-TBD",
+    "note": "dev bundle calibrated on raw NVR decode; parity re-derive pending"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "frame_id": "example-healthy",
+  "frame": 7986,
+  "model_version": "498184ea+dev+thr-v1",
+  "detections": [],
+  "scalar_measurements": {
+    "lit_L": 150.0,
+    "lit_R": 136.0,
+    "peak": 0.8928173780441284,
+    "dx": 1.0,
+    "dy": -3.0,
+    "slot": 0,
+    "status_code": 0
+  },
+  "status": "readable"
+}
