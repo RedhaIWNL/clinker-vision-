@@ -1,0 +1,9 @@
+/data/
+/evidence/
+/logs/
+/model-state/*
+!/model-state/.gitkeep
+/config/config.yaml
+/.env
+/bin/
+/dist/

@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package clinkervision.inference.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/clinkervision/clinker-vision/internal/inference/gen;inferencev1";
+
+service InferenceService {
+  // Provisional service name: the source documents specify streaming but do
+  // not yet specify the RPC name. This is the minimal bidirectional stream
+  // needed by the persistent pipeline/model boundary.
+  rpc Infer(stream InferenceRequest) returns (stream InferenceResponse);
+}
+
+message InferenceRequest {
+  string frame_id = 1;
+  string camera_id = 2;
+  bytes image_data = 3;
+  google.protobuf.Timestamp captured_at = 4;
+  uint64 sequence_no = 5;
+}
+
+message InferenceResponse {
+  string frame_id = 1;
+  repeated Detection detections = 2;
+  map<string, float> scalar_measurements = 3;
+  string model_version = 4;
+  google.protobuf.Timestamp processed_at = 5;
+}
+
+message Detection {
+  ObservationTarget observation_target = 1;
+  FaultType fault_type = 2;
+  float confidence = 3;
+  BoundingBox bounding_box = 4;
+}
+
+message BoundingBox {
+  float x = 1;
+  float y = 2;
+  float width = 3;
+  float height = 4;
+}
+
+enum ObservationTarget {
+  OBSERVATION_TARGET_UNSPECIFIED = 0;
+  GODET = 1;
+  GALET = 2;
+  CLINKER_LEVEL = 3;
+}
+
+enum FaultType {
+  FAULT_TYPE_UNSPECIFIED = 0;
+  DAMAGE = 1;
+  CRACK = 2;
+  WEAR = 3;
+  MISALIGNMENT = 4;
+  GAP = 5;
+  MISSING_GALET = 6;
+  SPILLAGE = 7;
+  LEVEL_THRESHOLD = 8;
+}

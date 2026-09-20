@@ -1,0 +1,57 @@
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: deploy/pipeline.Dockerfile
+    image: ${PIPELINE_IMAGE:-clinker-vision-pipeline:rel-1}
+    command: ["-config", "/etc/clinker-vision/config.yaml"]
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    volumes:
+      - ./config/config.yaml:/etc/clinker-vision/config.yaml:ro
+      - ./data:/srv/clinker-vision/data
+      - ./evidence:/srv/clinker-vision/evidence
+      - ./logs:/srv/clinker-vision/logs
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    depends_on:
+      - model
+
+  model:
+    build:
+      context: ./godet-damage-detector-model
+      dockerfile: Dockerfile
+    image: ${MODEL_IMAGE:-clinker-vision-model:rel-1}
+    command: ["python", "-m", "src.server", "--bind", "0.0.0.0:50051", "--bundle-dir", "/app/model", "--store-path", "/app/state/store.db", "--model-build", "${MODEL_BUILD:-rel-1}"]
+    expose:
+      - "50051"
+    volumes:
+      - ./godet-damage-detector-model/model:/app/model:ro
+      - ./model-state:/app/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: ${MODEL_MEMORY_LIMIT:-2g}
+    cpus: ${MODEL_CPUS:-2}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',50051),2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+    networks:
+      - default
+    restart: unless-stopped
+
+networks:
+  default:
+    name: clinker-vision

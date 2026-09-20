@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package clinkervision.inference.v2;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/clinkervision/clinker-vision/internal/inference/gen/v2;inferencev2";
+
+// Model service: dense-frames-in, per-frame measurements (Tier 1) + per-godet
+// damage state (Tier 2). Contract v0.3 (accepted). BACKWARD-INCOMPATIBLE with v1.
+service InferenceService {
+  // Bidi stream, one persistent stream per inference worker. frame_id correlates
+  // request/response; per-camera order is by sequence_no (reorder window: 64 frames).
+  // Per-frame input errors do not abort the stream and receive no response.
+  rpc Infer(stream InferenceRequest) returns (stream InferenceResponse);
+  // Tier 2: the actual product. Per-godet state over identity + history.
+  rpc GetGodetState(GodetStateRequest) returns (GodetStateResponse);
+}
+
+message InferenceRequest {
+  string frame_id = 1;
+  string camera_id = 2;
+  bytes image_data = 3;  // dense full-frame JPEG, FFmpeg MJPEG -q:v 3, max 8 MB.
+  google.protobuf.Timestamp captured_at = 4;  // source/decode capture time, not send time.
+  uint64 sequence_no = 5;
+}
+
+message InferenceResponse {
+  string frame_id = 1;
+  // Compatibility ROI indicator (fixed box, identical on every detection) or empty.
+  repeated Detection detections = 2;
+  // Pinned keys: lit_L, lit_R, peak, dx, dy, slot, status_code.
+  // status_code: readable=0, weak=1, edge=2, occluded=3.
+  map<string, float> scalar_measurements = 3;
+  string model_version = 4;
+  google.protobuf.Timestamp processed_at = 5;
+}
+
+message Detection {
+  string observation_target = 1;  // "GODET" (MVP)
+  string fault_type = 2;          // "DAMAGE" (MVP)
+  // confidence intentionally absent until a mapping is signed.
+  BoundingBox bounding_box = 4;
+}
+
+// Fixed ROI indicator for the 2688x1520 CAM-1 night ROI. It is not localized damage.
+message BoundingBox { float x = 1; float y = 2; float width = 3; float height = 4; }
+
+message GodetStateRequest { repeated int32 godet_ids = 1; bool include_history = 2; }
+message GodetStateResponse {
+  string model_version = 1;
+  repeated GodetState godets = 2;
+  Health health = 3;
+  repeated GodetAlertEvent events = 4;  // replayable Tier-2 state changes
+}
+message GodetState {
+  int32 godet_id = 1;
+  // healthy | suspect | persistent | pending | confirmed
+  string state = 2;
+  float lip = 3;
+  bool near_plate = 4;
+  int32 last_seen_loop = 5;
+  repeated float lip_history = 6;
+}
+message Health {
+  bool ready = 1;
+  bool loop_locked = 2;
+  // ok | resyncing | template_lost | trigger_lost | population_alarm | not_ready
+  string status = 3;
+  string detail = 4;
+  map<string, double> counters = 5;
+}
+
+message GodetAlertEvent {
+  string event_key = 1;          // stable DAMAGE:<godet_id>:<loop>
+  string kind = 2;              // damage (MVP)
+  int32 godet_id = 3;
+  int32 loop_no = 4;
+  string state = 5;              // pending | confirmed
+  string evidence_frame_id = 6;  // Tier-1 candidate frame, if retained
+  google.protobuf.Timestamp occurred_at = 7;
+  map<string, double> measurements = 8;
+}
