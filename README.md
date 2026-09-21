@@ -33,6 +33,7 @@ GET /health/live
 GET /health/ready
 GET /metrics
 GET /
+GET /api/v1/status
 GET /api/v1/alerts
 GET /api/v1/alerts/{alert_id}
 GET /api/v1/alerts/{alert_id}/evidence

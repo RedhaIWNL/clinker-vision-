@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/clinkervision/clinker-vision/internal/evidence"
@@ -65,6 +66,72 @@ type listResponse struct {
 type seenResponse struct {
 	AlertID string    `json:"alert_id"`
 	SeenAt  time.Time `json:"seen_at"`
+}
+
+// ModelStatus is the last-known Tier-2 model state, served at
+// GET /api/v1/status for the viewer status header. It is returned with
+// HTTP 200 even when the model is not ready — describing the state is
+// the point. A nil *StatusStore reports the default starting snapshot.
+type ModelStatus struct {
+	Ready        bool               `json:"ready"`
+	LoopLocked   bool               `json:"loop_locked"`
+	Status       string             `json:"status"`
+	Detail       string             `json:"detail"`
+	ModelVersion string             `json:"model_version"`
+	LastPollAt   *time.Time         `json:"last_poll_at,omitempty"`
+	LastError    string             `json:"last_error,omitempty"`
+	Counters     map[string]float64 `json:"counters,omitempty"`
+}
+
+// StatusStore holds the latest Tier-2 snapshot written by the pipeline
+// state-poll loop. Safe for concurrent use.
+type StatusStore struct {
+	mu   sync.RWMutex
+	snap ModelStatus
+}
+
+func defaultStatus() ModelStatus {
+	return ModelStatus{Status: "starting", Detail: "waiting for first Tier-2 poll"}
+}
+
+func NewStatusStore() *StatusStore {
+	return &StatusStore{snap: defaultStatus()}
+}
+
+// Update mutates the snapshot under lock. No-op on a nil store so callers
+// may omit it.
+func (s *StatusStore) Update(fn func(*ModelStatus)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&s.snap)
+}
+
+func (s *StatusStore) Get() ModelStatus {
+	if s == nil {
+		return defaultStatus()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := s.snap
+	if out.Counters != nil {
+		counters := make(map[string]float64, len(out.Counters))
+		for k, v := range out.Counters {
+			counters[k] = v
+		}
+		out.Counters = counters
+	}
+	if out.LastPollAt != nil {
+		at := *out.LastPollAt
+		out.LastPollAt = &at
+	}
+	return out
+}
+
+func (s *StatusStore) ServeStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.Get())
 }
 
 type alertCursor struct {

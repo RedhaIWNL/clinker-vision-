@@ -42,7 +42,7 @@ func TestAlertAPIContract(t *testing.T) {
 	api.Now = func() time.Time { return now }
 	h := health.New()
 	h.SetReady(true)
-	handler := NewHandler(h, metrics.New(), api)
+	handler := NewHandler(h, metrics.New(), api, nil)
 
 	response := doAPIRequest(t, handler, http.MethodGet, "/api/v1/alerts?camera_id=CAM-1&limit=1")
 	var page listResponse
@@ -104,7 +104,7 @@ func TestAlertAPIHidesMissingAndInvalidEvidence(t *testing.T) {
 	}
 	defer alertStore.Close()
 	api := NewAPI(alertStore, filepath.Join(root, "evidence"))
-	handler := NewHandler(health.New(), metrics.New(), api)
+	handler := NewHandler(health.New(), metrics.New(), api, nil)
 	for _, path := range []string{"/api/v1/alerts/not-a-uuid", "/api/v1/alerts/550e8400-e29b-41d4-a716-446655440099/evidence"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))

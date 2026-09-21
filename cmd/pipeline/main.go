@@ -203,9 +203,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer modelClient.Close()
+	statusStore := web.NewStatusStore()
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Server.BindAddress, cfg.Server.WebPort),
-		Handler:           web.NewHandler(healthHandler, metricHandler, web.NewAPI(alertStore, cfg.Storage.EvidencePath)),
+		Handler:           web.NewHandler(healthHandler, metricHandler, web.NewAPI(alertStore, cfg.Storage.EvidencePath), statusStore),
 		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 
@@ -304,10 +305,17 @@ func main() {
 				ctx, cancel := context.WithTimeout(runCtx, time.Duration(cfg.Model.RequestTimeoutSeconds)*time.Second)
 				state, err := modelClient.GetGodetState(ctx, nil)
 				cancel()
+				polledAt := time.Now().UTC()
 				if err != nil {
 					healthHandler.SetReady(false)
 					metricHandler.DependencyFailures.Add(1)
 					logger.Warn("godet state poll failed", "component", "alerting", "reason", err.Error())
+					statusStore.Update(func(s *web.ModelStatus) {
+						at := polledAt
+						s.Ready = false
+						s.LastPollAt = &at
+						s.LastError = err.Error()
+					})
 					if stateFailureSince.IsZero() {
 						stateFailureSince = time.Now()
 					}
@@ -318,6 +326,21 @@ func main() {
 				}
 				stateFailureSince = time.Time{}
 				healthHandler.SetReady(state.GetHealth().GetReady())
+				counters := make(map[string]float64, len(state.GetHealth().GetCounters()))
+				for k, v := range state.GetHealth().GetCounters() {
+					counters[k] = v
+				}
+				statusStore.Update(func(s *web.ModelStatus) {
+					at := polledAt
+					s.Ready = state.GetHealth().GetReady()
+					s.LoopLocked = state.GetHealth().GetLoopLocked()
+					s.Status = state.GetHealth().GetStatus()
+					s.Detail = state.GetHealth().GetDetail()
+					s.ModelVersion = state.GetModelVersion()
+					s.Counters = counters
+					s.LastPollAt = &at
+					s.LastError = ""
+				})
 				latest := runtime.latestFrame()
 				if latest.FrameID == "" {
 					return
