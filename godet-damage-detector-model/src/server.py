@@ -133,6 +133,17 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
 
         t0 = time.time()
         self.bundle = load_bundle(bundle_dir)  # raises BundleError: fail startup
+        # TEST-ONLY daylight smoke-test bypass. Set SMOKE_TEST_RELAX_TEMPLATE=1
+        # to let a day feed flow through the stack when the night template
+        # cannot match (median peak ~0.2 < 0.5). Detections/alerts in this mode
+        # are MEANINGLESS; unset for any real evaluation. Production default 0.
+        self.smoke_test_relaxed = os.environ.get("SMOKE_TEST_RELAX_TEMPLATE") == "1"
+        if self.smoke_test_relaxed:
+            orig_peak = float(self.bundle.rules.get("template_lost_peak", 0.5))
+            self.bundle.rules["template_lost_peak"] = min(orig_peak, 0.05)
+            LOG.error("SMOKE TEST MODE: template_lost_peak %.2f -> %.2f "
+                      "(day feed forced to pass; detections MEANINGLESS)",
+                      orig_peak, self.bundle.rules["template_lost_peak"])
         self.pipe = StreamProcessor(self.bundle)
         self.ident = StreamingIdentity(self.bundle.master, self.bundle.loop_slots,
                                        self.bundle.rules)
@@ -379,11 +390,12 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
         import statistics
 
         fp = list(self.pipe.frame_peaks)
-        if not self.ident.locked and len(fp) >= 100 and statistics.median(fp) < 0.5:
+        peak_thr = float(self.bundle.rules.get("template_lost_peak", 0.5))
+        if not self.ident.locked and len(fp) >= 100 and statistics.median(fp) < peak_thr:
             # live startup self-test: nothing godet-like in view for 100+ frames
-            LOG.error("startup self-test FAILED: median frame peak %.2f < 0.5 "
-                      "over %d frames (camera moved / wrong feed?)", statistics.median(fp), len(fp))
-            lines.append("TEMPLATE LOST (camera moved / ROI changed?): median frame peak < 0.5")
+            LOG.error("startup self-test FAILED: median frame peak %.2f < %.2f "
+                      "over %d frames (camera moved / wrong feed?)", statistics.median(fp), peak_thr, len(fp))
+            lines.append("TEMPLATE LOST (camera moved / ROI changed?): median frame peak < %.2f" % peak_thr)
         drift = self.ident.loop_drift_est
         if drift is not None and abs(drift - self.bundle.loop_slots) / self.bundle.loop_slots > 0.03:
             lines.append(f"LOOP DRIFT: re-estimated {drift} slots vs pinned "

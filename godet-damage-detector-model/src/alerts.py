@@ -206,7 +206,7 @@ class AlertTracker:
         lines = []
         pk = pd.Series(list(self.peaks))
         if len(pk) >= 50 and float(pk.rolling(200, min_periods=50).median().iloc[-1]) < self.rules["template_lost_peak"]:
-            lines.append("TEMPLATE LOST (camera moved / ROI changed?): rolling median peak < 0.5")
+            lines.append("TEMPLATE LOST (camera moved / ROI changed?): rolling median peak < %.2f" % float(self.rules["template_lost_peak"]))
         if self.cap_times:
             tmax = max(self.cap_times)
             recent = sum(1 for t in self.cap_times if tmax - t < 60)

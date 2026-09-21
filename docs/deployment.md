@@ -73,6 +73,63 @@ curl -sS http://127.0.0.1:8080/health/ready
 curl -sS http://127.0.0.1:8080/metrics
 ```
 
+Compose starts the pipeline only after the model health check passes
+(`depends_on: service_healthy`), and the pipeline retries the model dial
+through the configured dependency timeout, so a slow model start no longer
+kills the pipeline. If the model container is recreated, the pipeline
+re-resolves `model:50051` (fresh dial) instead of sticking to the stale IP.
+
+## Daylight smoke test (temporary, stack-only)
+
+The shipped bundle is night-calibrated; a day feed fails the template self-test
+(`median frame peak < 0.5` → `template_lost`) by design. For a daylight
+stack check only, set in `.env`:
+
+```bash
+SMOKE_TEST_RELAX_TEMPLATE=1
+docker compose up -d --force-recreate model pipeline
+```
+
+This relaxes `template_lost_peak` to `0.05` at runtime (logged once as
+`SMOKE TEST MODE`) without touching `model/`. Pass criteria for today:
+
+```bash
+docker compose ps                                    # both Up, pipeline younger than model
+docker compose logs --tail=100 pipeline | grep -E "dense pipeline starting|connection refused|model client could not start"
+docker compose logs --tail=50 model | grep -E "SMOKE TEST|startup self-test|bundle loaded"
+curl -fsS http://127.0.0.1:8080/health/live         # must be 200
+curl -sS http://127.0.0.1:8080/health/ready         # expect false/not_ready today — OK
+curl -sS http://127.0.0.1:8080/metrics | grep -E "frames|dependency|alerts"
+```
+
+Expect: `dense pipeline starting`, zero `connection refused` after ~30 s, no
+`startup self-test FAILED`, `frames_total` climbing, `ready=false`. Tier-1
+frames flow so transport, polling, storage, and the viewer can be verified;
+no loop lock and no meaningful alerts. Detections/alerts in this mode are
+meaningless: back up then wipe `data/alerts.db` + `evidence/` afterwards,
+set the flag back to `0`, and recreate both services before any real
+evaluation.
+
+## Updating a server that already runs an older version
+
+Yes — after `git pull` you must rebuild, because this update changes the
+pipeline binary (Go), the model code (Python), and `docker-compose.yml`
+itself. A plain `up -d` would keep running the old images. From the project
+directory:
+
+```bash
+git pull
+docker compose build               # rebuilds pipeline + model with the new code
+docker compose up -d               # pipeline waits for model health before starting
+docker compose ps
+docker compose logs -f --tail=100 model pipeline
+```
+
+If only the model changed, `docker compose build model` + 
+`docker compose up -d --force-recreate model pipeline` is enough (recreate the
+pipeline too so it re-resolves the model IP). After any update, re-check
+`curl /health/live /health/ready /metrics` as above.
+
 `/health/ready` may remain false while the model is collecting enough dense
 frames to lock. The pipeline must not be used for operator alerts until it is
 ready.

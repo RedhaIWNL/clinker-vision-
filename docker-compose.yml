@@ -21,7 +21,8 @@ services:
       - ALL
     restart: unless-stopped
     depends_on:
-      - model
+      model:
+        condition: service_healthy
 
   model:
     build:
@@ -29,6 +30,11 @@ services:
       dockerfile: Dockerfile
     image: ${MODEL_IMAGE:-clinker-vision-model:rel-1}
     command: ["python", "-m", "src.server", "--bind", "0.0.0.0:50051", "--bundle-dir", "/app/model", "--store-path", "/app/state/store.db", "--model-build", "${MODEL_BUILD:-rel-1}"]
+    environment:
+      # TEST-ONLY daylight smoke-test bypass (unset/0 = production behavior).
+      # When 1, the model relaxes the template-lost self-test so a day feed
+      # flows through the stack. Detections/alerts in this mode are MEANINGLESS.
+      - SMOKE_TEST_RELAX_TEMPLATE=${SMOKE_TEST_RELAX_TEMPLATE:-0}
     expose:
       - "50051"
     volumes:
@@ -44,10 +50,13 @@ services:
     mem_limit: ${MODEL_MEMORY_LIMIT:-2g}
     cpus: ${MODEL_CPUS:-2}
     healthcheck:
+      # Liveness only (TCP listening). Loop-lock readiness is separate via
+      # GetGodetState.health.ready -> pipeline /health/ready.
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',50051),2); s.close()"]
       interval: 10s
       timeout: 3s
       retries: 30
+      start_period: 30s
     networks:
       - default
     restart: unless-stopped

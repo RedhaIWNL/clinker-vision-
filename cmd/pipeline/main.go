@@ -130,6 +130,34 @@ func inferWithRetry(ctx context.Context, client *inference.Client, frame ingest.
 	}
 }
 
+func dialModelWithRetry(ctx context.Context, address string, dependencyTimeout time.Duration, logger *slog.Logger) (*inference.Client, error) {
+	backoff := time.Second
+	deadline := time.Now().Add(dependencyTimeout)
+	for {
+		client, err := inference.Dial(ctx, address)
+		if err == nil {
+			return client, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if dependencyTimeout > 0 && time.Now().After(deadline) {
+			return nil, fmt.Errorf("%w: model dial %s: %v", errDependencyTimeout, address, err)
+		}
+		logger.Warn("model client could not start; retrying", "component", "inference", "reason", err.Error())
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "/etc/clinker-vision/config.yaml", "path to the protected YAML configuration")
 	healthcheck := flag.Bool("healthcheck", false, "check the local liveness endpoint and exit")
@@ -156,7 +184,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer alertStore.Close()
-	modelClient, err := inference.Dial(context.Background(), cfg.Model.GRPCAddress)
+	dependencyTimeout := time.Duration(cfg.Failure.DependencyTimeoutSeconds) * time.Second
+	modelClient, err := dialModelWithRetry(context.Background(), cfg.Model.GRPCAddress, dependencyTimeout, logger)
 	if err != nil {
 		logger.Error("model client could not start", "component", "inference", "reason", err.Error())
 		os.Exit(1)
@@ -170,7 +199,6 @@ func main() {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	dependencyTimeout := time.Duration(cfg.Failure.DependencyTimeoutSeconds) * time.Second
 	fatalErrors := make(chan error, 1)
 	reportFatal := func(err error) {
 		if err == nil {

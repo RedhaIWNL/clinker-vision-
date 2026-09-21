@@ -8,3 +8,5 @@
 /bin/
 /dist/
 testdata/video/*.mp4
+# Local session exports / notes (never commit).
+codex-session-*.md

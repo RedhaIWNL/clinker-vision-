@@ -42,9 +42,11 @@ type Client struct {
 	stream  inferencev2.InferenceService_InferClient
 	service inferencev2.InferenceServiceClient
 	conn    *grpc.ClientConn
+	address string
 
 	sendMu    sync.Mutex
 	streamMu  sync.RWMutex
+	serviceMu sync.RWMutex
 	pendingMu sync.Mutex
 	pending   map[string]chan responseResult
 	versionMu sync.RWMutex
@@ -68,6 +70,7 @@ func Dial(ctx context.Context, address string) (*Client, error) {
 		return nil, err
 	}
 	client.conn = conn
+	client.address = address
 	return client, nil
 }
 
@@ -87,8 +90,14 @@ func New(conn *grpc.ClientConn) (*Client, error) {
 	return client, nil
 }
 
+func (c *Client) getService() inferencev2.InferenceServiceClient {
+	c.serviceMu.RLock()
+	defer c.serviceMu.RUnlock()
+	return c.service
+}
+
 func (c *Client) openStream() error {
-	stream, err := c.service.Infer(context.Background())
+	stream, err := c.getService().Infer(context.Background())
 	if err != nil {
 		return fmt.Errorf("open inference stream: %w", err)
 	}
@@ -255,6 +264,12 @@ func (c *Client) Close() error {
 // pending requests are failed so their callers can retry them; the pipeline's
 // queue remains the bounded in-process outbox and applies backpressure while
 // this operation is retried.
+//
+// Docker recreates change the model IP behind the stable DNS name, so a new
+// stream on a stale ClientConn can keep dialing the old IP. Reconnect first
+// resets the gRPC backoff (forcing re-resolution on the next attempt) and,
+// if the stream still cannot be opened and the client was built with Dial
+// (address known), it redials a fresh ClientConn so DNS is resolved again.
 func (c *Client) Reconnect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -266,17 +281,61 @@ func (c *Client) Reconnect(ctx context.Context) error {
 		return ErrClientClosed
 	default:
 	}
-	stream, err := c.service.Infer(context.Background())
-	if err != nil {
+	if c.conn != nil {
+		c.conn.ResetConnectBackoff()
+	}
+	stream, err := c.getService().Infer(context.Background())
+	if err == nil {
+		c.streamMu.Lock()
+		old := c.stream
+		c.stream = stream
+		c.streamMu.Unlock()
+		c.failPending(errors.New("inference stream replaced"))
+		if old != nil {
+			_ = old.CloseSend()
+		}
+		c.receiveWG.Add(1)
+		go c.receive(stream)
+		return nil
+	}
+	if c.address == "" {
 		return fmt.Errorf("reconnect inference stream: %w", err)
 	}
+	return c.redialLocked(ctx, fmt.Errorf("reconnect inference stream: %w", err))
+}
+
+// redialLocked dials a fresh ClientConn for the stored address and swaps it
+// in. Caller must hold sendMu.
+func (c *Client) redialLocked(ctx context.Context, cause error) error {
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	newConn, err := grpc.DialContext(dialCtx, c.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("redial model service %s: %w (caused by %v)", c.address, err, cause)
+	}
+	newService := inferencev2.NewInferenceServiceClient(newConn)
+	stream, err := newService.Infer(context.Background())
+	if err != nil {
+		_ = newConn.Close()
+		return fmt.Errorf("redial inference stream: %w (caused by %v)", err, cause)
+	}
+	c.serviceMu.Lock()
+	oldService := c.service
+	c.service = newService
+	c.serviceMu.Unlock()
+	_ = oldService
 	c.streamMu.Lock()
-	old := c.stream
+	oldStream := c.stream
 	c.stream = stream
 	c.streamMu.Unlock()
-	c.failPending(errors.New("inference stream replaced"))
-	if old != nil {
-		_ = old.CloseSend()
+	oldConn := c.conn
+	c.conn = newConn
+	c.failPending(errors.New("inference client redialed"))
+	if oldStream != nil {
+		_ = oldStream.CloseSend()
+	}
+	if oldConn != nil {
+		_ = oldConn.Close()
 	}
 	c.receiveWG.Add(1)
 	go c.receive(stream)
@@ -387,7 +446,7 @@ func (c *Client) GetGodetState(ctx context.Context, request *inferencev2.GodetSt
 		return nil, ErrClientClosed
 	default:
 	}
-	response, err := c.service.GetGodetState(ctx, request)
+	response, err := c.getService().GetGodetState(ctx, request)
 	if err != nil {
 		return nil, err
 	}
