@@ -166,6 +166,52 @@ The pipeline database migration preserves the old MVP alerts and makes
 confidence nullable for the v2 model. Keep the SQLite database and `evidence/`
 directory together when backing up or restoring.
 
+## Night run (20:00–04:00 Casablanca, 1000-alert cap)
+
+`config/config.yaml` carries the night-run shape:
+
+```yaml
+schedule:
+  enabled: true
+  start: "20:00"
+  stop: "04:00"
+  timezone: "Africa/Casablanca"
+retention:
+  days: 365
+  max_alerts: 1000
+```
+
+Behavior: the process stays up around the clock (HTTP + viewer always live),
+but camera lanes only run inside the window. Outside it there is no ffmpeg
+process and no model traffic; `/health/ready` is false and `/api/v1/status`
+reports `standby` with the resume time. At 20:00 lanes start automatically
+(first detections ~20:20+ after the model locks); at 04:00 lanes stop and the
+pipeline writes `data/night-<date>.stats.json` plus the dawn report
+`data/reports/night-<date>.md` (totals, pending/confirmed, per-godet table,
+cap line). Regenerate any report any time with:
+
+```bash
+go run ./cmd/night-report -db data/alerts.db -evidence evidence \
+  -start 2026-09-21T20:00:00+01:00 -end 2026-09-22T04:00:00+01:00 \
+  -stats data/night-2026-09-21.stats.json -out data/reports/night-2026-09-21.md
+```
+
+At 1000 stored alerts the pipeline stops storing new keys (pending→confirmed
+upserts of known keys still go through) and counts every drop
+(`clinker_vision_alerts_dropped_cap_total`, warn log, `storage cap reached`
+in status detail). The cap resets only by manual wipe after the dawn review:
+
+```bash
+docker compose down
+cp data/alerts.db "data/alerts.db.$(date -u +%Y%m%dT%H%M%SZ).bak"
+rm -f data/alerts.db && rm -rf evidence/2026
+docker compose up -d
+```
+
+To prove the full cycle today without waiting for night, use a 10-minute
+test window in a scratch config (never commit it), watch idle → start →
+stop → report appear, then restore the real window.
+
 ## Current integration boundary
 
 CAM-1 is the only enabled dense lane. Tier-1 responses are measurements and are

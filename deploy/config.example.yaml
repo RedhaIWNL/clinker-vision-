@@ -46,3 +46,13 @@ storage:
 
 retention:
   days: 365
+  # Night-run shape: cap stored alerts; 0 = unlimited (default preserves current behavior).
+  max_alerts: 1000
+
+# Night-run shape: when enabled, the pipeline only runs inside [start, stop)
+# in the given timezone; wraps midnight (20:00-04:00 = night run).
+schedule:
+  enabled: true
+  start: "20:00"
+  stop: "04:00"
+  timezone: "Africa/Casablanca"

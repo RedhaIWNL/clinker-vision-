@@ -13,6 +13,7 @@ type Metrics struct {
 	DecodeFailures     atomic.Uint64
 	InferenceRequests  atomic.Uint64
 	AlertsCreated      atomic.Uint64
+	AlertsDroppedCap   atomic.Uint64
 	DependencyFailures atomic.Uint64
 }
 
@@ -29,6 +30,7 @@ func (m *Metrics) Handler(w http.ResponseWriter, _ *http.Request) {
 	writeCounter(w, "clinker_vision_decode_failures_total", "Camera source or frame decode failures.", m.DecodeFailures.Load())
 	writeCounter(w, "clinker_vision_inference_requests_total", "Inference requests sent to the model service.", m.InferenceRequests.Load())
 	writeCounter(w, "clinker_vision_alerts_created_total", "Alerts created for qualifying detections.", m.AlertsCreated.Load())
+	writeCounter(w, "clinker_vision_alerts_dropped_cap_total", "Alert events dropped because the storage cap was reached.", m.AlertsDroppedCap.Load())
 	writeCounter(w, "clinker_vision_dependency_failures_total", "Required dependency failures observed.", m.DependencyFailures.Load())
 }
 

@@ -346,6 +346,20 @@ func (s *Store) Count(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+func (s *Store) HasEventKey(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, nil
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, "SELECT 1 FROM alerts WHERE event_key = ? LIMIT 1", key).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("has event key: %w", err)
+	}
+	return true, nil
+}
+
 func (s *Store) MarkSeen(ctx context.Context, alertID string, seenAt time.Time) (*time.Time, error) {
 	if _, err := s.db.ExecContext(ctx, "UPDATE alerts SET seen_at = COALESCE(seen_at, ?) WHERE alert_id = ?", formatTime(seenAt), alertID); err != nil {
 		return nil, fmt.Errorf("mark alert seen: %w", err)

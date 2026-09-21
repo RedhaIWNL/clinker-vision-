@@ -81,6 +81,8 @@ type ModelStatus struct {
 	LastPollAt   *time.Time         `json:"last_poll_at,omitempty"`
 	LastError    string             `json:"last_error,omitempty"`
 	Counters     map[string]float64 `json:"counters,omitempty"`
+	StoredAlerts int                `json:"stored_alerts"`
+	MaxAlerts    int                `json:"max_alerts"`
 }
 
 // StatusStore holds the latest Tier-2 snapshot written by the pipeline

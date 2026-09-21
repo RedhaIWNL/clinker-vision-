@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +41,7 @@ type Config struct {
 	Failure   FailureConfig   `yaml:"failure"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Retention RetentionConfig `yaml:"retention"`
+	Schedule  ScheduleConfig  `yaml:"schedule"`
 }
 
 type ServerConfig struct {
@@ -74,7 +76,15 @@ type StorageConfig struct {
 }
 
 type RetentionConfig struct {
-	Days int `yaml:"days"`
+	Days      int `yaml:"days"`
+	MaxAlerts int `yaml:"max_alerts"`
+}
+
+type ScheduleConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Start    string `yaml:"start"`
+	Stop     string `yaml:"stop"`
+	Timezone string `yaml:"timezone"`
 }
 
 func Defaults() Config {
@@ -110,6 +120,12 @@ func Defaults() Config {
 			JPEGQuality:  DefaultJPEGQuality,
 		},
 		Retention: RetentionConfig{Days: DefaultRetentionDays},
+		Schedule: ScheduleConfig{
+			Enabled:  false,
+			Start:    "20:00",
+			Stop:     "04:00",
+			Timezone: "Africa/Casablanca",
+		},
 	}
 }
 
@@ -198,7 +214,84 @@ func (c Config) Validate() error {
 	if c.Retention.Days <= 0 {
 		return errors.New("retention.days must be positive")
 	}
+	if c.Retention.MaxAlerts < 0 {
+		return errors.New("retention.max_alerts must be >= 0")
+	}
+	if err := c.Schedule.Validate(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s ScheduleConfig) Validate() error {
+	if !s.Enabled {
+		return nil
+	}
+	if _, err := parseHHMM(s.Start); err != nil {
+		return fmt.Errorf("schedule.start must be HH:MM 24h: %w", err)
+	}
+	if _, err := parseHHMM(s.Stop); err != nil {
+		return fmt.Errorf("schedule.stop must be HH:MM 24h: %w", err)
+	}
+	if s.Timezone == "" {
+		return errors.New("schedule.timezone is required when schedule is enabled")
+	}
+	if _, err := time.LoadLocation(s.Timezone); err != nil {
+		return fmt.Errorf("schedule.timezone must be a valid IANA timezone: %w", err)
+	}
+	return nil
+}
+
+func parseHHMM(v string) (int, error) {
+	if len(v) != 5 || v[2] != ':' {
+		return 0, fmt.Errorf("invalid value %q, want HH:MM", v)
+	}
+	for i, c := range v {
+		if i == 2 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid value %q, want HH:MM", v)
+		}
+	}
+	hour := int(v[0]-'0')*10 + int(v[1]-'0')
+	minute := int(v[3]-'0')*10 + int(v[4]-'0')
+	if hour < 0 || hour > 23 {
+		return 0, fmt.Errorf("hour out of range in %q, want 00-23", v)
+	}
+	if minute < 0 || minute > 59 {
+		return 0, fmt.Errorf("minute out of range in %q, want 00-59", v)
+	}
+	return hour*60 + minute, nil
+}
+
+func (s ScheduleConfig) Contains(t time.Time) bool {
+	if !s.Enabled {
+		return true
+	}
+	start, err := parseHHMM(s.Start)
+	if err != nil {
+		return false
+	}
+	stop, err := parseHHMM(s.Stop)
+	if err != nil {
+		return false
+	}
+	if start == stop {
+		return true
+	}
+	if s.Timezone != "" {
+		loc, err := time.LoadLocation(s.Timezone)
+		if err != nil {
+			return false
+		}
+		t = t.In(loc)
+	}
+	mins := t.Hour()*60 + t.Minute()
+	if start < stop {
+		return mins >= start && mins < stop
+	}
+	return mins >= start || mins < stop
 }
 
 func validateCameras(cameras []CameraConfig) error {

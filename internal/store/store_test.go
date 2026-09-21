@@ -168,6 +168,38 @@ func TestStoreMigratesLegacyConfidenceAndTier2Columns(t *testing.T) {
 	}
 }
 
+func TestStoreCountAndHasEventKey(t *testing.T) {
+	ctx := context.Background()
+	alertStore := openTestStore(t, t.TempDir())
+	first := validAlert()
+	first.EventKey = "DAMAGE:224:0"
+	second := validAlert()
+	second.AlertID = "550e8400-e29b-41d4-a716-446655440012"
+	second.FrameID = "550e8400-e29b-41d4-a716-446655440013"
+	second.EvidenceRef = "2026/09/17/CAM-1/550e8400-e29b-41d4-a716-446655440012.jpg"
+	if err := alertStore.InsertAlert(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := alertStore.InsertAlert(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := alertStore.Count(ctx); err != nil || count != 2 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+	found, err := alertStore.HasEventKey(ctx, first.EventKey)
+	if err != nil || !found {
+		t.Fatalf("HasEventKey(known)=%v err=%v", found, err)
+	}
+	found, err = alertStore.HasEventKey(ctx, "DAMAGE:999:0")
+	if err != nil || found {
+		t.Fatalf("HasEventKey(unknown)=%v err=%v", found, err)
+	}
+	found, err = alertStore.HasEventKey(ctx, "")
+	if err != nil || found {
+		t.Fatalf("HasEventKey(empty)=%v err=%v", found, err)
+	}
+}
+
 func openTestStore(t *testing.T, root string) *Store {
 	t.Helper()
 	alertStore, err := Open(context.Background(), filepath.Join(root, "data", "alerts.db"), filepath.Join(root, "evidence"))
