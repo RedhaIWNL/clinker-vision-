@@ -1,7 +1,11 @@
 # Ubuntu deployment
 
-This deployment runs both services on the Ubuntu host. The pipeline listens on
-`127.0.0.1:8080`; the model is reachable only inside the Compose network.
+This deployment runs both services on the Ubuntu host. The pipeline is reachable
+on the host at `127.0.0.1:8080` (compose publishes `127.0.0.1:...:8080`, so no
+LAN exposure); inside its container it listens on `0.0.0.0:8080` via
+`PIPELINE_BIND_ADDRESS`, otherwise Docker NAT to the container IP gets RST.
+Bare-metal `go run` keeps the config default `127.0.0.1`. The model is
+reachable only inside the Compose network.
 
 ## First setup
 

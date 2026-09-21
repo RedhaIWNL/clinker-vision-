@@ -46,9 +46,17 @@ func TestLoadRejectsInsecurePermissions(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsNonLocalBind(t *testing.T) {
+func TestValidateBindRules(t *testing.T) {
 	cfg := validConfig()
+	cfg.Server.BindAddress = "127.0.0.1"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("127.0.0.1 must be accepted: %v", err)
+	}
 	cfg.Server.BindAddress = "0.0.0.0"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("0.0.0.0 must be accepted for the container listener: %v", err)
+	}
+	cfg.Server.BindAddress = "192.168.1.13"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected non-local bind address to be rejected")
 	}

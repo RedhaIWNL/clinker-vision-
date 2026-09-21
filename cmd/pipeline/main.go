@@ -185,6 +185,18 @@ func main() {
 	}
 	defer alertStore.Close()
 	dependencyTimeout := time.Duration(cfg.Failure.DependencyTimeoutSeconds) * time.Second
+	// Container override: the config file stays 127.0.0.1 (bare-metal
+	// default), but inside Docker the pipeline must listen on 0.0.0.0 or
+	// the host NAT to the container IP gets RST (container-loopback only).
+	// External exposure is still localhost-only via the compose port
+	// publish 127.0.0.1:8080:8080.
+	if override := os.Getenv("PIPELINE_BIND_ADDRESS"); override != "" {
+		if override != "127.0.0.1" && override != "0.0.0.0" {
+			logger.Error("invalid bind override", "component", "config", "reason", "PIPELINE_BIND_ADDRESS must be 127.0.0.1 or 0.0.0.0")
+			os.Exit(1)
+		}
+		cfg.Server.BindAddress = override
+	}
 	modelClient, err := dialModelWithRetry(context.Background(), cfg.Model.GRPCAddress, dependencyTimeout, logger)
 	if err != nil {
 		logger.Error("model client could not start", "component", "inference", "reason", err.Error())

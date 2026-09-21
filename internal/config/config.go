@@ -158,8 +158,8 @@ func (c Config) Validate() error {
 		return errors.New("server.bind_address is required")
 	}
 	parsedIP := net.ParseIP(c.Server.BindAddress)
-	if parsedIP == nil || !parsedIP.Equal(net.ParseIP(DefaultBindAddress)) {
-		return errors.New("server.bind_address must be 127.0.0.1 for the MVP")
+	if parsedIP == nil || (!parsedIP.Equal(net.ParseIP("127.0.0.1")) && !parsedIP.Equal(net.ParseIP("0.0.0.0"))) {
+		return errors.New("server.bind_address must be 127.0.0.1 or 0.0.0.0 (0.0.0.0 is for the container only; the host publish stays localhost-only)")
 	}
 	if c.Server.WebPort < 1 || c.Server.WebPort > 65535 {
 		return errors.New("server.web_port must be between 1 and 65535")

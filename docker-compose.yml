@@ -5,6 +5,11 @@ services:
       dockerfile: deploy/pipeline.Dockerfile
     image: ${PIPELINE_IMAGE:-clinker-vision-pipeline:rel-1}
     command: ["-config", "/etc/clinker-vision/config.yaml"]
+    environment:
+      # In-container listener must be 0.0.0.0 or Docker NAT to the container
+      # IP gets RST. Host exposure stays localhost-only via the port publish
+      # below (127.0.0.1:...:8080). Bare-metal `go run` keeps config 127.0.0.1.
+      - PIPELINE_BIND_ADDRESS=0.0.0.0
     ports:
       - "127.0.0.1:${WEB_PORT:-8080}:8080"
     volumes:
