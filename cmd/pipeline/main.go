@@ -103,6 +103,7 @@ type windowTracker struct {
 	stored      int
 	upserts     int
 	droppedCap  int
+	pollErrors  int
 	storedTotal int
 	capReached  bool
 	versions    map[string]struct{}
@@ -116,7 +117,7 @@ func (t *windowTracker) reset(start time.Time, storedTotal int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.start = start
-	t.processed, t.stored, t.upserts, t.droppedCap = 0, 0, 0, 0
+	t.processed, t.stored, t.upserts, t.droppedCap, t.pollErrors = 0, 0, 0, 0, 0
 	t.storedTotal = storedTotal
 	t.capReached = false
 	t.versions = make(map[string]struct{})
@@ -154,6 +155,12 @@ func (t *windowTracker) noteDropped() {
 	t.capReached = true
 }
 
+func (t *windowTracker) notePollError() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pollErrors++
+}
+
 func (t *windowTracker) noteVersion(version string) {
 	if version == "" {
 		return
@@ -169,6 +176,7 @@ type windowSnapshot struct {
 	stored      int
 	upserts     int
 	droppedCap  int
+	pollErrors  int
 	storedTotal int
 	capReached  bool
 	versions    []string
@@ -184,8 +192,9 @@ func (t *windowTracker) snapshot() windowSnapshot {
 	sortStrings(versions)
 	return windowSnapshot{
 		start: t.start, processed: t.processed, stored: t.stored,
-		upserts: t.upserts, droppedCap: t.droppedCap, storedTotal: t.storedTotal,
-		capReached: t.capReached, versions: versions,
+		upserts: t.upserts, droppedCap: t.droppedCap, pollErrors: t.pollErrors,
+		storedTotal: t.storedTotal,
+		capReached:  t.capReached, versions: versions,
 	}
 }
 
@@ -470,6 +479,7 @@ func (e *laneEnv) runWindow(parent context.Context, scheduled bool) {
 				if err != nil {
 					e.health.SetReady(false)
 					e.metrics.DependencyFailures.Add(1)
+					e.tracker.notePollError()
 					e.logger.Warn("godet state poll failed", "component", "alerting", "reason", err.Error())
 					e.status.Update(func(s *web.ModelStatus) {
 						at := polledAt
@@ -667,10 +677,13 @@ func (e *laneEnv) finishWindow() {
 		return
 	}
 	end := time.Now()
+	last := e.status.Get()
 	stats := report.WindowStats{
 		WindowStart: snap.start, WindowEnd: end,
 		ProcessedEvents: snap.processed, Stored: snap.stored,
 		DroppedCap: snap.droppedCap, Upsets: snap.upserts,
+		PollErrors: snap.pollErrors,
+		LastStatus: last.Status, LastDetail: last.Detail, Counters: last.Counters,
 		ModelVersions: snap.versions, MaxAlerts: e.maxAlerts(),
 	}
 	statsPath, reportPath := nightReportPaths(e.cfg.Storage.SQLitePath, snap.start)
@@ -678,7 +691,7 @@ func (e *laneEnv) finishWindow() {
 		e.logger.Error("window stats encode failed", "component", "pipeline", "reason", err.Error())
 	} else if err := os.MkdirAll(filepath.Dir(statsPath), 0o750); err != nil {
 		e.logger.Error("window stats directory failed", "component", "pipeline", "reason", err.Error())
-	} else if err := os.WriteFile(statsPath, data, 0o600); err != nil {
+	} else if err := os.WriteFile(statsPath, data, 0o644); err != nil {
 		e.logger.Error("window stats write failed", "component", "pipeline", "reason", err.Error())
 	} else {
 		e.logger.Info("window stats written", "component", "pipeline", "path", statsPath)

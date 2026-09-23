@@ -188,7 +188,10 @@ reports `standby` with the resume time. At 20:00 lanes start automatically
 (first detections ~20:20+ after the model locks); at 04:00 lanes stop and the
 pipeline writes `data/night-<date>.stats.json` plus the dawn report
 `data/reports/night-<date>.md` (totals, pending/confirmed, per-godet table,
-cap line). Regenerate any report any time with:
+poll errors, last model status and counters, cap line). Reports and stats
+sidecars are world-readable by design, so plain `cat` works — no sudo needed
+(for files written before this change, run once:
+`sudo chmod -R a+rX data/reports data/night-*.stats.json`). Regenerate any report any time with:
 
 ```bash
 go run ./cmd/night-report -db data/alerts.db -evidence evidence \
@@ -204,9 +207,12 @@ in status detail). The cap resets only by manual wipe after the dawn review:
 ```bash
 docker compose down
 cp data/alerts.db "data/alerts.db.$(date -u +%Y%m%dT%H%M%SZ).bak"
-rm -f data/alerts.db && rm -rf evidence/2026
-docker compose up -d
+sudo rm -f data/alerts.db && sudo rm -rf evidence/20*
+docker compose up -d   # back to standby until 20:00
 ```
+
+Evidence JPEGs and the database are owned by the container UID, so the wipe
+needs sudo. Back up first: the delete is irreversible.
 
 To prove the full cycle today without waiting for night, use a 10-minute
 test window in a scratch config (never commit it), watch idle → start →

@@ -17,14 +17,18 @@ import (
 // WindowStats carries the pipeline counters for the reported window.
 // MaxAlerts is the storage cap (0 means unlimited).
 type WindowStats struct {
-	WindowStart     time.Time `json:"window_start"`
-	WindowEnd       time.Time `json:"window_end"`
-	ProcessedEvents int       `json:"processed_events"`
-	Stored          int       `json:"stored"`
-	DroppedCap      int       `json:"dropped_cap"`
-	Upsets          int       `json:"upsets"`
-	ModelVersions   []string  `json:"model_versions"`
-	MaxAlerts       int       `json:"max_alerts"`
+	WindowStart     time.Time          `json:"window_start"`
+	WindowEnd       time.Time          `json:"window_end"`
+	ProcessedEvents int                `json:"processed_events"`
+	Stored          int                `json:"stored"`
+	DroppedCap      int                `json:"dropped_cap"`
+	Upsets          int                `json:"upsets"`
+	PollErrors      int                `json:"poll_errors"`
+	LastStatus      string             `json:"last_status"`
+	LastDetail      string             `json:"last_detail"`
+	Counters        map[string]float64 `json:"counters,omitempty"`
+	ModelVersions   []string           `json:"model_versions"`
+	MaxAlerts       int                `json:"max_alerts"`
 }
 
 // Generate pages ListAlerts (Since=WindowStart) selecting rows with DetectedAt
@@ -143,6 +147,25 @@ func Generate(ctx context.Context, alertStore *store.Store, stats WindowStats, o
 	b.WriteString(fmt.Sprintf("Seen: %d, Unseen: %d\n\n", seen, unseen))
 	b.WriteString(fmt.Sprintf("Processed events: %d, Stored: %d, Dropped at cap: %d, Upsets: %d\n\n",
 		stats.ProcessedEvents, stats.Stored, stats.DroppedCap, stats.Upsets))
+	b.WriteString(fmt.Sprintf("Tier-2 poll errors: %d\n\n", stats.PollErrors))
+	if stats.LastStatus != "" || stats.LastDetail != "" {
+		detail := stats.LastDetail
+		if detail == "" {
+			detail = "—"
+		}
+		b.WriteString(fmt.Sprintf("Last model status: %s — %s\n\n", stats.LastStatus, detail))
+	}
+	if len(stats.Counters) > 0 {
+		parts := make([]string, 0, 6)
+		for _, key := range []string{"frames_total", "captures_total", "godet_rows", "dead_letters_total", "sequence_gaps_total", "virtual_slots_total"} {
+			if value, ok := stats.Counters[key]; ok {
+				parts = append(parts, fmt.Sprintf("%s=%.0f", key, value))
+			}
+		}
+		if len(parts) > 0 {
+			b.WriteString("Model counters: " + strings.Join(parts, ", ") + "\n\n")
+		}
+	}
 	b.WriteString("## Godets\n\n")
 	b.WriteString("| godet | loop | state | detected_at | drop |\n")
 	b.WriteString("| --- | --- | --- | --- | --- |\n")
@@ -159,12 +182,15 @@ func Generate(ctx context.Context, alertStore *store.Store, stats WindowStats, o
 	b.WriteString(capLine + "\n\n")
 	b.WriteString("Storage note: alerts are retained in SQLite up to the configured cap; evidence files live under the configured evidence root.\n")
 
+	// Reports are operator-readable by design (alert metadata, no secrets),
+	// so the host user can cat them without sudo. Evidence and database
+	// files stay restricted; only reports and stats sidecars are relaxed.
 	if dir := filepath.Dir(outPath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create report directory: %w", err)
 		}
 	}
-	if err := os.WriteFile(outPath, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 	return nil
