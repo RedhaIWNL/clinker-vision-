@@ -73,6 +73,7 @@ type seenResponse struct {
 // HTTP 200 even when the model is not ready — describing the state is
 // the point. A nil *StatusStore reports the default starting snapshot.
 type ModelStatus struct {
+	CameraID     string             `json:"camera_id,omitempty"`
 	Ready        bool               `json:"ready"`
 	LoopLocked   bool               `json:"loop_locked"`
 	Status       string             `json:"status"`
@@ -83,13 +84,19 @@ type ModelStatus struct {
 	Counters     map[string]float64 `json:"counters,omitempty"`
 	StoredAlerts int                `json:"stored_alerts"`
 	MaxAlerts    int                `json:"max_alerts"`
+	// Per-camera status (one entry per enabled camera, config order). The top-level
+	// fields repeat the camera that is currently running (else the first camera), so
+	// readers of the single-camera shape keep working.
+	Cameras []ModelStatus `json:"cameras,omitempty"`
 }
 
 // StatusStore holds the latest Tier-2 snapshot written by the pipeline
-// state-poll loop. Safe for concurrent use.
+// state-poll loops (one per camera). Safe for concurrent use.
 type StatusStore struct {
-	mu   sync.RWMutex
-	snap ModelStatus
+	mu      sync.RWMutex
+	snap    ModelStatus
+	cameras map[string]ModelStatus
+	order   []string
 }
 
 func defaultStatus() ModelStatus {
@@ -111,13 +118,68 @@ func (s *StatusStore) Update(fn func(*ModelStatus)) {
 	fn(&s.snap)
 }
 
+// UpdateCamera mutates one camera's snapshot under lock (created on first use).
+func (s *StatusStore) UpdateCamera(cameraID string, fn func(*ModelStatus)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cameras == nil {
+		s.cameras = make(map[string]ModelStatus)
+	}
+	snap, ok := s.cameras[cameraID]
+	if !ok {
+		snap = defaultStatus()
+		s.order = append(s.order, cameraID)
+	}
+	fn(&snap)
+	snap.CameraID = cameraID
+	snap.Cameras = nil
+	s.cameras[cameraID] = snap
+}
+
+// Camera returns one camera's snapshot (the default snapshot if it never reported).
+func (s *StatusStore) Camera(cameraID string) ModelStatus {
+	if s == nil {
+		return defaultStatus()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if snap, ok := s.cameras[cameraID]; ok {
+		return copyStatus(snap)
+	}
+	return defaultStatus()
+}
+
 func (s *StatusStore) Get() ModelStatus {
 	if s == nil {
 		return defaultStatus()
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := s.snap
+	if len(s.order) > 0 {
+		cameras := make([]ModelStatus, 0, len(s.order))
+		summary := -1
+		for i, id := range s.order {
+			snap := copyStatus(s.cameras[id])
+			cameras = append(cameras, snap)
+			if summary < 0 && snap.Status != "standby" {
+				summary = i
+			}
+		}
+		if summary < 0 {
+			summary = 0
+		}
+		out := copyStatus(cameras[summary])
+		out.Cameras = cameras
+		return out
+	}
+	return copyStatus(s.snap)
+}
+
+func copyStatus(in ModelStatus) ModelStatus {
+	out := in
 	if out.Counters != nil {
 		counters := make(map[string]float64, len(out.Counters))
 		for k, v := range out.Counters {

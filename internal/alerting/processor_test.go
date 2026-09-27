@@ -194,3 +194,66 @@ func processorResponse(frameID string, confidences ...float32) *inferencev1.Infe
 		ProcessedAt:  timestamppb.New(time.Date(2026, 9, 17, 8, 0, 1, 0, time.UTC)),
 	}
 }
+
+func TestCAM4EventUsesItsOwnBoxKeyAndMeasurements(t *testing.T) {
+	root := t.TempDir()
+	alertStore := openProcessorStore(t, root)
+	cam1 := processorFrame()
+	cam4 := processorFrame()
+	cam4.CameraID = "CAM-4"
+	cam4.FrameID = "550e8400-e29b-41d4-a716-446655440044"
+	health := &inferencev2.Health{Ready: true, LoopLocked: true, Status: "ok"}
+	now := func() time.Time { return cam1.CapturedAt.Add(time.Minute) }
+	// CAM-1 godet 227 loop 3 and CAM-4 godet 227 loop 3 must stay two alerts.
+	g1 := &inferencev2.GodetState{GodetId: 227, State: "confirmed", Lip: 60, LastSeenLoop: 3}
+	e1 := &inferencev2.GodetAlertEvent{EventKey: EventKey("CAM-1", 227, 3), Kind: "damage", GodetId: 227, LoopNo: 3, State: "confirmed", EvidenceFrameId: cam1.FrameID}
+	if _, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m1", Godets: []*inferencev2.GodetState{g1}, Events: []*inferencev2.GodetAlertEvent{e1}, Health: health}, cam1, 85, filepath.Join(root, "evidence"), alertStore, now); err != nil {
+		t.Fatal(err)
+	}
+	g4 := &inferencev2.GodetState{GodetId: 227, State: "confirmed", Severity: 2.4, PassesSeen: 3, LastSeenLoop: 3}
+	e4 := &inferencev2.GodetAlertEvent{EventKey: EventKey("CAM-4", 227, 3), Kind: "damage", GodetId: 227, LoopNo: 3, State: "confirmed", EvidenceFrameId: cam4.FrameID,
+		EvidenceBox: &inferencev2.BoundingBox{X: 0.3, Y: 0.6, Width: 0.1, Height: 0.17}}
+	if _, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m4", Godets: []*inferencev2.GodetState{g4}, Events: []*inferencev2.GodetAlertEvent{e4}, Health: health}, cam4, 85, filepath.Join(root, "evidence"), alertStore, now); err != nil {
+		t.Fatal(err)
+	}
+	if e4.GetEventKey() != "CAM-4:DAMAGE:227:3" || e1.GetEventKey() != "DAMAGE:227:3" {
+		t.Fatalf("keys %q %q", e1.GetEventKey(), e4.GetEventKey())
+	}
+	list, err := alertStore.ListAlerts(context.Background(), store.ListFilter{CameraID: "CAM-4", Limit: 10})
+	if err != nil || len(list.Alerts) != 1 {
+		t.Fatalf("CAM-4 alerts=%#v err=%v", list, err)
+	}
+	a := list.Alerts[0]
+	if a.BoundingBox.X != 0.3 || a.BoundingBox.Height != 0.17 {
+		t.Fatalf("CAM-4 box not used: %+v", a.BoundingBox)
+	}
+	if !bytes.Contains([]byte(a.MeasurementsJSON), []byte(`"severity"`)) || bytes.Contains([]byte(a.MeasurementsJSON), []byte(`"lip"`)) {
+		t.Fatalf("CAM-4 measurements = %s", a.MeasurementsJSON)
+	}
+	if n, _ := alertStore.Count(context.Background()); n != 2 {
+		t.Fatalf("want 2 alerts (one per camera), got %d", n)
+	}
+	one, err := alertStore.ListAlerts(context.Background(), store.ListFilter{CameraID: "CAM-1", Limit: 10})
+	if err != nil || len(one.Alerts) != 1 || one.Alerts[0].BoundingBox.X != fixedGodetBox.X {
+		t.Fatalf("CAM-1 alert changed: %#v err=%v", one, err)
+	}
+	if state, found, err := alertStore.EventState(context.Background(), "CAM-4:DAMAGE:227:3"); err != nil || !found || state != "confirmed" {
+		t.Fatalf("EventState = %q %v %v", state, found, err)
+	}
+}
+
+func TestEvidenceFallbackIsMarked(t *testing.T) {
+	root := t.TempDir()
+	alertStore := openProcessorStore(t, root)
+	live := processorFrame()
+	live.CameraID = "CAM-4"
+	g := &inferencev2.GodetState{GodetId: 5, State: "confirmed", Severity: 2, LastSeenLoop: 1}
+	e := &inferencev2.GodetAlertEvent{EventKey: EventKey("CAM-4", 5, 1), Kind: "damage", GodetId: 5, LoopNo: 1, State: "confirmed", EvidenceFrameId: "550e8400-e29b-41d4-a716-446655449999"}
+	if _, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m4", Godets: []*inferencev2.GodetState{g}, Events: []*inferencev2.GodetAlertEvent{e}, Health: &inferencev2.Health{}}, live, 85, filepath.Join(root, "evidence"), alertStore, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := alertStore.ListAlerts(context.Background(), store.ListFilter{Limit: 10})
+	if len(list.Alerts) != 1 || !bytes.Contains([]byte(list.Alerts[0].MeasurementsJSON), []byte(`"evidence":"latest_frame"`)) {
+		t.Fatalf("fallback not marked: %#v", list.Alerts)
+	}
+}

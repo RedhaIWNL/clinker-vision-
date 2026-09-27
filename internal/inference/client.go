@@ -49,6 +49,7 @@ type Client struct {
 	serviceMu sync.RWMutex
 	pendingMu sync.Mutex
 	pending   map[string]chan responseResult
+	cameras   map[string]string // frame_id -> camera_id of pending requests
 	versionMu sync.RWMutex
 	version   string
 	closeOnce sync.Once
@@ -82,6 +83,7 @@ func New(conn *grpc.ClientConn) (*Client, error) {
 	client := &Client{
 		service: service,
 		pending: make(map[string]chan responseResult),
+		cameras: make(map[string]string),
 		closed:  make(chan struct{}),
 	}
 	if err := client.openStream(); err != nil {
@@ -131,6 +133,7 @@ func (c *Client) Infer(ctx context.Context, frame ingest.Frame) (*inferencev2.In
 		return nil, fmt.Errorf("frame %s already has a pending request", request.GetFrameId())
 	}
 	c.pending[request.GetFrameId()] = result
+	c.cameras[request.GetFrameId()] = request.GetCameraId()
 	c.pendingMu.Unlock()
 
 	c.sendMu.Lock()
@@ -197,15 +200,17 @@ func (c *Client) handleResponse(response *inferencev2.InferenceResponse) {
 	frameID := response.GetFrameId()
 	c.pendingMu.Lock()
 	result, ok := c.pending[frameID]
+	cameraID := c.cameras[frameID]
 	if ok {
 		delete(c.pending, frameID)
+		delete(c.cameras, frameID)
 	}
 	c.pendingMu.Unlock()
 	if !ok {
 		return
 	}
 
-	validated, err := ValidateResponse(frameID, response)
+	validated, err := ValidateResponseForCamera(frameID, cameraID, response)
 	if err == nil {
 		c.versionMu.Lock()
 		c.version = validated.GetModelVersion()
@@ -218,6 +223,7 @@ func (c *Client) failPending(err error) {
 	c.pendingMu.Lock()
 	pending := c.pending
 	c.pending = make(map[string]chan responseResult)
+	c.cameras = make(map[string]string)
 	c.pendingMu.Unlock()
 	for _, result := range pending {
 		result <- responseResult{err: err}
@@ -227,6 +233,7 @@ func (c *Client) failPending(err error) {
 func (c *Client) removePending(frameID string) {
 	c.pendingMu.Lock()
 	delete(c.pending, frameID)
+	delete(c.cameras, frameID)
 	c.pendingMu.Unlock()
 }
 
@@ -365,7 +372,20 @@ func RequestFromFrame(frame ingest.Frame) (*inferencev2.InferenceRequest, error)
 	return request, nil
 }
 
+// Tier-1 scalar keys every response of a camera must carry.
+var tier1RequiredScalars = map[string][]string{
+	"CAM-1": {"peak", "dx", "dy", "slot"},
+	"CAM-4": {"chain_step", "chain_pos", "match_quality", "chain_status"},
+}
+
+// ValidateResponse checks a CAM-1 Tier-1 response (kept for existing callers).
 func ValidateResponse(expectedFrameID string, response *inferencev2.InferenceResponse) (*inferencev2.InferenceResponse, error) {
+	return ValidateResponseForCamera(expectedFrameID, "CAM-1", response)
+}
+
+// ValidateResponseForCamera checks a Tier-1 response against the rules of the camera
+// the frame came from. An unknown camera gets the CAM-1 rules.
+func ValidateResponseForCamera(expectedFrameID, cameraID string, response *inferencev2.InferenceResponse) (*inferencev2.InferenceResponse, error) {
 	if response == nil {
 		return nil, fmt.Errorf("%w: response is nil", ErrInvalidResponse)
 	}
@@ -383,9 +403,32 @@ func ValidateResponse(expectedFrameID string, response *inferencev2.InferenceRes
 			return nil, fmt.Errorf("%w: scalar_measurements[%s] is not finite", ErrInvalidResponse, name)
 		}
 	}
-	for _, name := range []string{"peak", "dx", "dy", "slot"} {
+	required, known := tier1RequiredScalars[cameraID]
+	if !known {
+		required = tier1RequiredScalars["CAM-1"]
+	}
+	for _, name := range required {
 		if _, ok := response.GetScalarMeasurements()[name]; !ok {
 			return nil, fmt.Errorf("%w: scalar_measurements[%s] is required", ErrInvalidResponse, name)
+		}
+	}
+	if chainStatus, ok := response.GetScalarMeasurements()["chain_status"]; ok && (chainStatus < 0 || chainStatus > 2 || math.Trunc(float64(chainStatus)) != float64(chainStatus)) {
+		return nil, fmt.Errorf("%w: scalar_measurements[chain_status] must be an integer from 0 through 2", ErrInvalidResponse)
+	}
+	for index, retained := range response.GetRetainedFrames() {
+		if retained == nil {
+			return nil, fmt.Errorf("%w: retained frame %d is nil", ErrInvalidResponse, index)
+		}
+		if _, err := uuid.Parse(retained.GetFrameId()); err != nil {
+			return nil, fmt.Errorf("%w: retained frame %d frame_id must be a UUID", ErrInvalidResponse, index)
+		}
+		if len(retained.GetImageData()) == 0 {
+			return nil, fmt.Errorf("%w: retained frame %d has no image", ErrInvalidResponse, index)
+		}
+		if retained.GetCapturedAt() != nil {
+			if err := retained.GetCapturedAt().CheckValid(); err != nil {
+				return nil, fmt.Errorf("%w: retained frame %d captured_at: %v", ErrInvalidResponse, index, err)
+			}
 		}
 	}
 	if statusCode, ok := response.GetScalarMeasurements()["status_code"]; ok && (statusCode < 0 || statusCode > 3 || math.Trunc(float64(statusCode)) != float64(statusCode)) {
@@ -480,6 +523,19 @@ func ValidateGodetStateResponse(response *inferencev2.GodetStateResponse) error 
 		}
 		if !finite(godet.GetLip()) {
 			return fmt.Errorf("%w: godet state %d lip is not finite", ErrInvalidResponse, index)
+		}
+		if !finite(godet.GetSeverity()) {
+			return fmt.Errorf("%w: godet state %d severity is not finite", ErrInvalidResponse, index)
+		}
+	}
+	for index, event := range response.GetEvents() {
+		if event == nil {
+			return fmt.Errorf("%w: event %d is nil", ErrInvalidResponse, index)
+		}
+		if box := event.GetEvidenceBox(); box != nil {
+			if !finite(box.GetX()) || !finite(box.GetY()) || !finite(box.GetWidth()) || !finite(box.GetHeight()) {
+				return fmt.Errorf("%w: event %d evidence_box is not finite", ErrInvalidResponse, index)
+			}
 		}
 	}
 	return nil

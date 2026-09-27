@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -216,4 +217,31 @@ func (s *failOnceService) Infer(stream inferencev2.InferenceService_InferServer)
 
 func (s *failOnceService) GetGodetState(context.Context, *inferencev2.GodetStateRequest) (*inferencev2.GodetStateResponse, error) {
 	return &inferencev2.GodetStateResponse{ModelVersion: "reconnected", Health: &inferencev2.Health{Ready: true, LoopLocked: true, Status: "ok"}}, nil
+}
+
+func TestValidateResponseForCameraCAM4(t *testing.T) {
+	ok := &inferencev2.InferenceResponse{FrameId: "f", ModelVersion: "m", ProcessedAt: timestamppb.Now(),
+		ScalarMeasurements: map[string]float32{"chain_step": 8.1, "chain_pos": 1000, "match_quality": 0.7, "chain_status": 0},
+		RetainedFrames: []*inferencev2.RetainedFrame{{FrameId: "550e8400-e29b-41d4-a716-446655440001", ImageData: []byte{1}, CapturedAt: timestamppb.Now()}}}
+	if _, err := ValidateResponseForCamera("f", "CAM-4", ok); err != nil {
+		t.Fatalf("valid CAM-4 response rejected: %v", err)
+	}
+	if _, err := ValidateResponseForCamera("f", "CAM-1", ok); err == nil {
+		t.Fatal("CAM-1 rules must still require peak/dx/dy/slot")
+	}
+	bad := proto.Clone(ok).(*inferencev2.InferenceResponse)
+	bad.ScalarMeasurements["chain_status"] = 7
+	if _, err := ValidateResponseForCamera("f", "CAM-4", bad); err == nil {
+		t.Fatal("chain_status out of range accepted")
+	}
+	bad = proto.Clone(ok).(*inferencev2.InferenceResponse)
+	bad.RetainedFrames[0].FrameId = "not-a-uuid"
+	if _, err := ValidateResponseForCamera("f", "CAM-4", bad); err == nil {
+		t.Fatal("retained frame with a bad frame_id accepted")
+	}
+	bad = proto.Clone(ok).(*inferencev2.InferenceResponse)
+	bad.RetainedFrames[0].ImageData = nil
+	if _, err := ValidateResponseForCamera("f", "CAM-4", bad); err == nil {
+		t.Fatal("retained frame without an image accepted")
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -15,6 +16,37 @@ import (
 )
 
 var fixedGodetBox = evidence.BoundingBox{X: 0.3806, Y: 0.1158, Width: 0.0536, Height: 0.1697}
+
+// EventKey is the stable deduplication key of a godet damage event. CAM-1 keeps its
+// original DAMAGE:<godet>:<loop> keys; other cameras are prefixed so equal godet and
+// loop numbers on two cameras never share (and overwrite) one alert.
+func EventKey(cameraID string, godetID, loop int32) string {
+	if cameraID == "" || cameraID == "CAM-1" {
+		return fmt.Sprintf("DAMAGE:%d:%d", godetID, loop)
+	}
+	return fmt.Sprintf("%s:DAMAGE:%d:%d", cameraID, godetID, loop)
+}
+
+// eventBox is the box drawn on the evidence: the event's own fault-spot box when the
+// model sends one (CAM-4), else CAM-1's fixed ROI indicator.
+func eventBox(event *inferencev2.GodetAlertEvent) evidence.BoundingBox {
+	b := event.GetEvidenceBox()
+	if b == nil || b.GetWidth() <= 0 || b.GetHeight() <= 0 {
+		return fixedGodetBox
+	}
+	x := clamp01(float64(b.GetX()))
+	y := clamp01(float64(b.GetY()))
+	w := math.Min(float64(b.GetWidth()), 1-x)
+	h := math.Min(float64(b.GetHeight()), 1-y)
+	if w <= 0 || h <= 0 {
+		return fixedGodetBox
+	}
+	return evidence.BoundingBox{X: float32(x), Y: float32(y), Width: float32(w), Height: float32(h)}
+}
+
+func clamp01(v float64) float64 {
+	return math.Max(0, math.Min(1, v))
+}
 
 // ProcessGodetState consumes Tier-2 state. Tier-1 Infer responses are never
 // passed here and therefore cannot create operator alerts.
@@ -53,7 +85,7 @@ func ProcessGodetState(ctx context.Context, state *inferencev2.GodetStateRespons
 		if godet == nil || (godet.GetState() != "pending" && godet.GetState() != "confirmed") || godet.GetLastSeenLoop() < 0 {
 			continue
 		}
-		event := &inferencev2.GodetAlertEvent{EventKey: fmt.Sprintf("DAMAGE:%d:%d", godet.GetGodetId(), godet.GetLastSeenLoop()), Kind: "damage", GodetId: godet.GetGodetId(), LoopNo: godet.GetLastSeenLoop(), State: strings.ToLower(godet.GetState()), EvidenceFrameId: frame.FrameID}
+		event := &inferencev2.GodetAlertEvent{EventKey: EventKey(frame.CameraID, godet.GetGodetId(), godet.GetLastSeenLoop()), Kind: "damage", GodetId: godet.GetGodetId(), LoopNo: godet.GetLastSeenLoop(), State: strings.ToLower(godet.GetState()), EvidenceFrameId: frame.FrameID}
 		alert, err := processGodetEvent(ctx, state, event, godet, frame, quality, evidenceRoot, alertStore, now)
 		if err != nil {
 			return created, err
@@ -77,7 +109,7 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	}
 	eventKey := event.GetEventKey()
 	if eventKey == "" {
-		eventKey = fmt.Sprintf("DAMAGE:%d:%d", event.GetGodetId(), event.GetLoopNo())
+		eventKey = EventKey(frame.CameraID, event.GetGodetId(), event.GetLoopNo())
 	}
 	alertID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(eventKey))
 	capturedAt := frame.CapturedAt
@@ -89,8 +121,17 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	for key, value := range event.GetMeasurements() {
 		measurementValues[key] = value
 	}
-	measurementValues["lip"] = godet.GetLip()
-	measurementValues["near_plate"] = godet.GetNearPlate()
+	if frame.CameraID == "CAM-4" {
+		measurementValues["severity"] = godet.GetSeverity()
+		measurementValues["passes_seen"] = godet.GetPassesSeen()
+	} else {
+		measurementValues["lip"] = godet.GetLip()
+		measurementValues["near_plate"] = godet.GetNearPlate()
+	}
+	if want := event.GetEvidenceFrameId(); want != "" && want != frame.FrameID {
+		// the named frame was no longer cached: the picture shows the live view, not the fault
+		measurementValues["evidence"] = "latest_frame"
+	}
 	measurementValues["state"] = event.GetState()
 	measurementValues["last_seen_loop"] = event.GetLoopNo()
 	measurements, err := json.Marshal(measurementValues)
@@ -101,7 +142,8 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	if err != nil {
 		return nil, err
 	}
-	jpegData, err := evidence.RenderJPEGWithBoxes(frame.ImageData, []evidence.BoxOverlay{{FaultType: "DAMAGE", BoundingBox: fixedGodetBox}}, quality)
+	box := eventBox(event)
+	jpegData, err := evidence.RenderJPEGWithBoxes(frame.ImageData, []evidence.BoxOverlay{{FaultType: "DAMAGE", BoundingBox: box}}, quality)
 	if err != nil {
 		return nil, fmt.Errorf("render godet evidence: %w", err)
 	}
@@ -112,7 +154,7 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	if evidenceFrameID == "" || evidenceFrameID != frame.FrameID {
 		evidenceFrameID = frame.FrameID
 	}
-	alert := store.Alert{AlertID: alertID.String(), CapturedAt: capturedAt, DetectedAt: seenNow, CreatedAt: seenNow, CameraID: frame.CameraID, ObservationTarget: "godet", FaultType: "DAMAGE", FrameID: frame.FrameID, ModelVersion: state.GetModelVersion(), BoundingBox: store.BoundingBox{X: fixedGodetBox.X, Y: fixedGodetBox.Y, Width: fixedGodetBox.Width, Height: fixedGodetBox.Height}, EvidenceRef: ref, GodetID: event.GetGodetId(), AlertState: strings.ToLower(event.GetState()), LoopNo: event.GetLoopNo(), RuleID: "DAMAGE", EventKey: eventKey, EvidenceFrameID: evidenceFrameID, MeasurementsJSON: string(measurements)}
+	alert := store.Alert{AlertID: alertID.String(), CapturedAt: capturedAt, DetectedAt: seenNow, CreatedAt: seenNow, CameraID: frame.CameraID, ObservationTarget: "godet", FaultType: "DAMAGE", FrameID: frame.FrameID, ModelVersion: state.GetModelVersion(), BoundingBox: store.BoundingBox{X: box.X, Y: box.Y, Width: box.Width, Height: box.Height}, EvidenceRef: ref, GodetID: event.GetGodetId(), AlertState: strings.ToLower(event.GetState()), LoopNo: event.GetLoopNo(), RuleID: "DAMAGE", EventKey: eventKey, EvidenceFrameID: evidenceFrameID, MeasurementsJSON: string(measurements)}
 	if err := alertStore.UpsertGodetAlert(ctx, alert); err != nil {
 		_ = evidence.Remove(evidenceRoot, ref)
 		return nil, err

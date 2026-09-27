@@ -1,0 +1,89 @@
+{
+ "bundle_format": "cam4-1",
+ "camera_id": "CAM-4",
+ "lighting": "day",
+ "thresholds_id": "c4d-20260927",
+ "frame_size": [
+  2688,
+  1520
+ ],
+ "geometry": {
+  "p0": [
+   990.0,
+   1180.0
+  ],
+  "travel_deg": 115.0,
+  "slit_half": 200,
+  "mosaic_pad": 20,
+  "odo_a": [
+   -160,
+   160
+  ],
+  "odo_b": [
+   -150,
+   50
+  ],
+  "slit_a": [
+   -6,
+   7
+  ],
+  "baselines": [
+   1,
+   2,
+   3,
+   4
+  ]
+ },
+ "detector": {
+  "rows": [
+   40,
+   280
+  ],
+  "texture_rows": [
+   60,
+   280
+  ],
+  "pitch": 161,
+  "block": 400,
+  "raise_px": 10,
+  "pole_px": 60,
+  "shadow_depth": 80,
+  "dark_frac": 0.72
+ },
+ "identity": {
+  "loop_cols": 194778,
+  "godets": 1210,
+  "pitch": 160.97355371900827,
+  "phase": 16.0,
+  "piece": 4000,
+  "step": 2500,
+  "min_match": 0.45,
+  "fingerprint_std": [
+   7.5963921546936035,
+   3.595004081726074
+  ],
+  "reference": {
+   "run": "h10",
+   "start_col": 2000
+  }
+ },
+ "rules": {
+  "pass_alarm_relative": 1.65,
+  "godet_alarm_relative": 1.65,
+  "min_passes": 2,
+  "history_passes": 8,
+  "population_passes": 1210
+ },
+ "provenance": {
+  "labels": [
+   "cam4_day_damage_labels_2026-09-26-21-56.json",
+   "cam4_day_severity_grades_2026-09-26-22-29.json",
+   "cam4_day_verdict_check_2026-09-26-23-13.json"
+  ],
+  "videos": [
+   "NVR_ch4_main_20260907100000_20260907110000.mp4",
+   "NVR_ch4_main_20260907120003_20260907130000.mp4"
+  ],
+  "plan": "CAM4_DAY_PLAN_v2.md"
+ }
+}

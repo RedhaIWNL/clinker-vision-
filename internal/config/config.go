@@ -34,6 +34,10 @@ const (
 
 var requiredCameraIDs = []string{"CAM-1", "CAM-2", "CAM-3", "CAM-4", "CAM-5", "CAM-6"}
 
+// Cameras the model service can analyse: CAM-1 (night godet lips) and CAM-4 (day side
+// plates). Every other camera must stay disabled.
+var supportedCameraIDs = map[string]bool{"CAM-1": true, "CAM-4": true}
+
 type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	Cameras   []CameraConfig  `yaml:"cameras"`
@@ -55,6 +59,9 @@ type CameraConfig struct {
 	NVRRTSPURL            string `yaml:"nvr_rtsp_url"`
 	SampleIntervalSeconds int    `yaml:"sample_interval_seconds"`
 	QueueCapacity         int    `yaml:"queue_capacity"`
+	// Optional operating window for this camera only (CAM-1 at night, CAM-4 by day).
+	// When absent the camera follows the global schedule.
+	Schedule *ScheduleConfig `yaml:"schedule"`
 }
 
 type ModelConfig struct {
@@ -223,6 +230,15 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// ScheduleFor returns the operating window of one camera: its own schedule when it has
+// one, otherwise the global schedule.
+func (c Config) ScheduleFor(camera CameraConfig) ScheduleConfig {
+	if camera.Schedule != nil {
+		return *camera.Schedule
+	}
+	return c.Schedule
+}
+
 func (s ScheduleConfig) Validate() error {
 	if !s.Enabled {
 		return nil
@@ -318,9 +334,14 @@ func validateCameras(cameras []CameraConfig) error {
 		if camera.QueueCapacity <= 0 {
 			return fmt.Errorf("camera %s queue_capacity must be positive", camera.ID)
 		}
+		if camera.Schedule != nil {
+			if err := camera.Schedule.Validate(); err != nil {
+				return fmt.Errorf("camera %s: %w", camera.ID, err)
+			}
+		}
 		if camera.Enabled {
-			if camera.ID != "CAM-1" {
-				return fmt.Errorf("camera %s must be disabled in the MVP", camera.ID)
+			if !supportedCameraIDs[camera.ID] {
+				return fmt.Errorf("camera %s must be disabled: the model supports only CAM-1 and CAM-4", camera.ID)
 			}
 			if err := validateRTSPURL(camera.NVRRTSPURL); err != nil {
 				return fmt.Errorf("camera %s: %w", camera.ID, err)

@@ -34,7 +34,7 @@ services:
       context: ./godet-damage-detector-model
       dockerfile: Dockerfile
     image: ${MODEL_IMAGE:-clinker-vision-model:rel-1}
-    command: ["python", "-m", "src.server", "--bind", "0.0.0.0:50051", "--bundle-dir", "/app/model", "--store-path", "/app/state/store.db", "--model-build", "${MODEL_BUILD:-rel-1}"]
+    command: ["python", "-m", "src.server", "--bind", "0.0.0.0:50051", "--bundle-dir", "/app/model", "--cam4-bundle-dir", "/app/model/cam4", "--store-path", "/app/state/store.db", "--model-build", "${MODEL_BUILD:-rel-1}"]
     environment:
       # TEST-ONLY daylight smoke-test bypass (unset/0 = production behavior).
       # When 1, the model relaxes the template-lost self-test so a day feed
