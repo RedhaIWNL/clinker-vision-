@@ -218,10 +218,11 @@ type laneEnv struct {
 	model          *inference.Client
 	loc            *time.Location
 	reportFatal    func(error)
-	tracker        *windowTracker
 	dependencyTO   time.Duration
 	requestTimeout time.Duration
 	statePoll      time.Duration
+	readyMu        sync.Mutex
+	ready          map[string]bool // camera -> ready, for cameras inside their window
 }
 
 func (e *laneEnv) maxAlerts() int {
@@ -264,6 +265,22 @@ func nightReportPaths(sqlitePath string, windowStart time.Time) (statsPath, repo
 	day := windowStart.Format("2006-01-02")
 	return filepath.Join(dir, "night-"+day+".stats.json"),
 		filepath.Join(dir, "reports", "night-"+day+".md")
+}
+
+// windowReportPaths names one camera's window sidecar and report. CAM-1 keeps the
+// original night-<date> names; other cameras get <camera>-<date> (CAM-4: CAM-4-day-<date>).
+func windowReportPaths(sqlitePath, cameraID string, windowStart time.Time) (statsPath, reportPath string) {
+	if cameraID == "" || cameraID == "CAM-1" {
+		return nightReportPaths(sqlitePath, windowStart)
+	}
+	name := cameraID
+	if cameraID == "CAM-4" {
+		name = "CAM-4-day"
+	}
+	dir := filepath.Dir(sqlitePath)
+	day := windowStart.Format("2006-01-02")
+	return filepath.Join(dir, name+"-"+day+".stats.json"),
+		filepath.Join(dir, "reports", name+"-"+day+".md")
 }
 
 func sleepOrDone(ctx context.Context, duration time.Duration) bool {
@@ -344,27 +361,74 @@ func dialModelWithRetry(ctx context.Context, address string, dependencyTimeout t
 	}
 }
 
+// setCameraReady records one camera's readiness; /health/ready is true only while at
+// least one camera is inside its window and every such camera is ready. A camera in
+// standby (outside its window) is removed and does not count.
+func (e *laneEnv) setCameraReady(cameraID string, ready, inWindow bool) {
+	e.readyMu.Lock()
+	defer e.readyMu.Unlock()
+	if e.ready == nil {
+		e.ready = make(map[string]bool)
+	}
+	if inWindow {
+		e.ready[cameraID] = ready
+	} else {
+		delete(e.ready, cameraID)
+	}
+	all := len(e.ready) > 0
+	for _, r := range e.ready {
+		all = all && r
+	}
+	e.health.SetReady(all)
+}
+
+// supervise runs one supervisor per enabled camera: each camera has its own operating
+// window (CAM-1 at night, CAM-4 by day), lanes, window counters and report. The model
+// connection is shared.
 func (e *laneEnv) supervise(parent context.Context) {
-	if !e.cfg.Schedule.Enabled {
-		e.tracker.reset(time.Now(), 0)
-		e.runWindow(parent, false)
+	var wg sync.WaitGroup
+	for _, camera := range e.cfg.Cameras {
+		if !camera.Enabled {
+			continue
+		}
+		camera := camera
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.superviseCamera(parent, camera)
+		}()
+	}
+	wg.Wait()
+}
+
+func (e *laneEnv) superviseCamera(parent context.Context, camera config.CameraConfig) {
+	schedule := e.cfg.ScheduleFor(camera)
+	tracker := newWindowTracker()
+	if !schedule.Enabled {
+		tracker.reset(time.Now(), 0)
+		e.runCamera(parent, camera, schedule, tracker, false)
 		return
+	}
+	loc := e.loc
+	if schedule.Timezone != "" {
+		if loaded, err := time.LoadLocation(schedule.Timezone); err == nil {
+			loc = loaded
+		}
 	}
 	idleLogged := false
 	for parent.Err() == nil {
-		now := time.Now().In(e.loc)
-		if !e.cfg.Schedule.Contains(now) {
-			e.health.SetReady(false)
+		if !schedule.Contains(time.Now().In(loc)) {
+			e.setCameraReady(camera.ID, false, false)
 			detail := fmt.Sprintf("outside operating window %s-%s %s",
-				e.cfg.Schedule.Start, e.cfg.Schedule.Stop, e.cfg.Schedule.Timezone)
-			e.status.Update(func(s *web.ModelStatus) {
+				schedule.Start, schedule.Stop, schedule.Timezone)
+			e.status.UpdateCamera(camera.ID, func(s *web.ModelStatus) {
 				s.Ready = false
 				s.LoopLocked = false
 				s.Status = "standby"
 				s.Detail = detail
 			})
 			if !idleLogged {
-				e.logger.Info("lanes idle outside operating window", "component", "pipeline", "detail", detail)
+				e.logger.Info("camera idle outside operating window", "component", "pipeline", "camera_id", camera.ID, "detail", detail)
 				idleLogged = true
 			}
 			if !sleepOrDone(parent, 30*time.Second) {
@@ -373,286 +437,303 @@ func (e *laneEnv) supervise(parent context.Context) {
 			continue
 		}
 		idleLogged = false
-		e.runWindow(parent, true)
+		e.runCamera(parent, camera, schedule, tracker, true)
 	}
 }
 
-// runWindow builds fresh lanes, runs them until parent is done (or, for a
-// scheduled window, until the window closes), then tears them down. When the
-// window was scheduled, a stats sidecar and markdown report are written.
-func (e *laneEnv) runWindow(parent context.Context, scheduled bool) {
+// runCamera builds a fresh lane for one camera, runs it until parent is done (or, for a
+// scheduled window, until the camera's window closes), then tears it down. When the
+// window was scheduled, a stats sidecar and markdown report are written for it.
+func (e *laneEnv) runCamera(parent context.Context, camera config.CameraConfig, schedule config.ScheduleConfig, tracker *windowTracker, scheduled bool) {
 	laneCtx, laneCancel := context.WithCancel(parent)
 	defer laneCancel()
-	runtimes := make([]*cameraRuntime, 0, len(e.cfg.Cameras))
-	for _, camera := range e.cfg.Cameras {
-		if !camera.Enabled {
-			continue
-		}
-		queue, err := framequeue.NewFrameQueue(camera.QueueCapacity)
-		if err != nil {
-			e.logger.Error("camera queue could not start", "component", "queue", "camera_id", camera.ID, "reason", err.Error())
-			e.reportFatal(fmt.Errorf("camera queue %s: %w", camera.ID, err))
-			return
-		}
-		runtimes = append(runtimes, &cameraRuntime{camera: camera, queue: queue, evidence: make(map[string]ingest.Frame)})
-	}
-	if len(runtimes) == 0 {
-		e.logger.Error("no enabled camera configured", "component", "pipeline")
-		e.reportFatal(errors.New("no enabled camera configured"))
+	queue, err := framequeue.NewFrameQueue(camera.QueueCapacity)
+	if err != nil {
+		e.logger.Error("camera queue could not start", "component", "queue", "camera_id", camera.ID, "reason", err.Error())
+		e.reportFatal(fmt.Errorf("camera queue %s: %w", camera.ID, err))
 		return
 	}
+	runtime := &cameraRuntime{camera: camera, queue: queue, evidence: make(map[string]ingest.Frame)}
 	storedTotal := 0
 	if n, err := e.store.Count(parent); err != nil {
 		e.logger.Error("storage count failed", "component", "store", "reason", err.Error())
 	} else {
 		storedTotal = n
 	}
-	e.tracker.reset(time.Now(), storedTotal)
-	e.logger.Info("lanes starting", "component", "pipeline",
-		"camera_count", len(runtimes), "stored_total", storedTotal, "max_alerts", e.maxAlerts())
+	tracker.reset(time.Now(), storedTotal)
+	e.logger.Info("lane starting", "component", "pipeline", "camera_id", camera.ID,
+		"stored_total", storedTotal, "max_alerts", e.maxAlerts())
 	var runtimeWG sync.WaitGroup
-	for _, runtime := range runtimes {
-		runtime := runtime
-		runtimeWG.Add(3)
-		go func() {
-			defer runtimeWG.Done()
-			defer runtime.queue.Close()
-			decoder := ingest.Decoder{CameraID: runtime.camera.ID, Source: runtime.camera.NVRRTSPURL}
-			runErr := decoder.Run(laneCtx, func(frame ingest.Frame) error {
-				e.metrics.FramesDecoded.Add(1)
-				e.metrics.FramesSampled.Add(1) // retained metric name; dense lane sends every frame
-				runtime.setLatest(frame)
-				if err := runtime.queue.PushWait(laneCtx, frame); err != nil {
-					return err
-				}
-				return nil
-			})
-			if runErr != nil && !errors.Is(runErr, context.Canceled) {
-				e.metrics.DecodeFailures.Add(1)
-				e.logger.Error("camera ingestion stopped", "component", "ingest", "camera_id", runtime.camera.ID, "reason", runErr.Error())
-				timer := time.NewTimer(e.dependencyTO)
-				select {
-				case <-laneCtx.Done():
-					timer.Stop()
-				case <-timer.C:
-					e.reportFatal(fmt.Errorf("%w: camera %s: %v", errDependencyTimeout, runtime.camera.ID, runErr))
-				}
+	runtimeWG.Add(3)
+	go func() {
+		defer runtimeWG.Done()
+		defer runtime.queue.Close()
+		decoder := ingest.Decoder{CameraID: runtime.camera.ID, Source: runtime.camera.NVRRTSPURL}
+		runErr := decoder.Run(laneCtx, func(frame ingest.Frame) error {
+			e.metrics.FramesDecoded.Add(1)
+			e.metrics.FramesSampled.Add(1) // retained metric name; dense lane sends every frame
+			runtime.setLatest(frame)
+			if err := runtime.queue.PushWait(laneCtx, frame); err != nil {
+				return err
 			}
-		}()
+			return nil
+		})
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			e.metrics.DecodeFailures.Add(1)
+			e.logger.Error("camera ingestion stopped", "component", "ingest", "camera_id", runtime.camera.ID, "reason", runErr.Error())
+			timer := time.NewTimer(e.dependencyTO)
+			select {
+			case <-laneCtx.Done():
+				timer.Stop()
+			case <-timer.C:
+				e.reportFatal(fmt.Errorf("%w: camera %s: %v", errDependencyTimeout, runtime.camera.ID, runErr))
+			}
+		}
+	}()
 
-		go func() {
-			defer runtimeWG.Done()
-			for {
-				frame, err := runtime.queue.Pop(laneCtx)
-				if err != nil {
-					if !errors.Is(err, context.Canceled) && !errors.Is(err, framequeue.ErrClosed) {
-						e.logger.Error("camera queue stopped", "component", "queue", "camera_id", runtime.camera.ID, "reason", err.Error())
-					}
+	go func() {
+		defer runtimeWG.Done()
+		for {
+			frame, err := runtime.queue.Pop(laneCtx)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) && !errors.Is(err, framequeue.ErrClosed) {
+					e.logger.Error("camera queue stopped", "component", "queue", "camera_id", runtime.camera.ID, "reason", err.Error())
+				}
+				return
+			}
+			e.metrics.InferenceRequests.Add(1)
+			response, inferenceErr := inferWithRetry(laneCtx, e.model, frame, e.requestTimeout, e.dependencyTO, e.logger)
+			if inferenceErr != nil {
+				if errors.Is(inferenceErr, errDependencyTimeout) {
+					e.reportFatal(inferenceErr)
 					return
 				}
-				e.metrics.InferenceRequests.Add(1)
-				response, inferenceErr := inferWithRetry(laneCtx, e.model, frame, e.requestTimeout, e.dependencyTO, e.logger)
-				if inferenceErr != nil {
-					if errors.Is(inferenceErr, errDependencyTimeout) {
-						e.reportFatal(inferenceErr)
-						return
-					}
-					e.metrics.DependencyFailures.Add(1)
-					if !errors.Is(inferenceErr, context.Canceled) {
-						e.logger.Error("inference failed", "component", "inference", "camera_id", frame.CameraID, "frame_id", frame.FrameID, "sequence_no", frame.SequenceNo, "reason", inferenceErr.Error())
-					}
-				} else if len(response.GetDetections()) > 0 {
-					runtime.cacheEvidence(frame)
+				e.metrics.DependencyFailures.Add(1)
+				if !errors.Is(inferenceErr, context.Canceled) {
+					e.logger.Error("inference failed", "component", "inference", "camera_id", frame.CameraID, "frame_id", frame.FrameID, "sequence_no", frame.SequenceNo, "reason", inferenceErr.Error())
 				}
+				continue
 			}
-		}()
+			if len(response.GetDetections()) > 0 {
+				runtime.cacheEvidence(frame)
+			}
+			// CAM-4: earlier frames the model found a strong fault spot in (it knows about
+			// 10 s after the frame, so it hands the frame back).
+			for _, retained := range response.GetRetainedFrames() {
+				capturedAt := frame.CapturedAt
+				if retained.GetCapturedAt() != nil {
+					capturedAt = retained.GetCapturedAt().AsTime()
+				}
+				runtime.cacheEvidence(ingest.Frame{FrameID: retained.GetFrameId(), CameraID: runtime.camera.ID,
+					ImageData: retained.GetImageData(), CapturedAt: capturedAt, SequenceNo: retained.GetSequenceNo()})
+			}
+		}
+	}()
 
-		go func() {
-			defer runtimeWG.Done()
-			seen := make(map[string]string)
-			var stateFailureSince time.Time
-			poll := func() {
-				ctx, cancel := context.WithTimeout(laneCtx, e.requestTimeout)
-				state, err := e.model.GetGodetState(ctx, nil)
-				cancel()
-				polledAt := time.Now().UTC()
-				if err != nil {
-					e.health.SetReady(false)
-					e.metrics.DependencyFailures.Add(1)
-					e.tracker.notePollError()
-					e.logger.Warn("godet state poll failed", "component", "alerting", "reason", err.Error())
-					e.status.Update(func(s *web.ModelStatus) {
-						at := polledAt
-						s.Ready = false
-						s.LastPollAt = &at
-						s.LastError = err.Error()
-					})
-					if stateFailureSince.IsZero() {
-						stateFailureSince = time.Now()
-					}
-					if e.dependencyTO > 0 && time.Since(stateFailureSince) >= e.dependencyTO {
-						e.reportFatal(fmt.Errorf("%w: godet state: %v", errDependencyTimeout, err))
-					}
-					return
-				}
-				stateFailureSince = time.Time{}
-				e.health.SetReady(state.GetHealth().GetReady())
-				e.tracker.noteVersion(state.GetModelVersion())
-				counters := make(map[string]float64, len(state.GetHealth().GetCounters()))
-				for k, v := range state.GetHealth().GetCounters() {
-					counters[k] = v
-				}
-				snap := e.tracker.snapshot()
-				e.status.Update(func(s *web.ModelStatus) {
-					at := polledAt
-					s.Ready = state.GetHealth().GetReady()
-					s.LoopLocked = state.GetHealth().GetLoopLocked()
-					s.Status = state.GetHealth().GetStatus()
-					s.Detail = state.GetHealth().GetDetail()
-					s.ModelVersion = state.GetModelVersion()
-					s.Counters = counters
-					s.StoredAlerts = snap.storedTotal
-					s.MaxAlerts = e.maxAlerts()
-					if snap.capReached {
-						if s.Detail == "" {
-							s.Detail = "storage cap reached"
-						} else {
-							s.Detail += " · storage cap reached"
-						}
-					}
-					s.LastPollAt = &at
-					s.LastError = ""
-				})
-				latest := runtime.latestFrame()
-				if latest.FrameID == "" {
-					return
-				}
-				if len(state.GetEvents()) > 0 {
-					godets := make(map[int32]*inferencev2.GodetState, len(state.GetGodets()))
-					for _, godet := range state.GetGodets() {
-						if godet != nil {
-							godets[godet.GetGodetId()] = godet
-						}
-					}
-					for _, event := range state.GetEvents() {
-						if event == nil || (event.GetState() != "pending" && event.GetState() != "confirmed") {
-							continue
-						}
-						key := event.GetEventKey()
-						if key == "" {
-							key = fmt.Sprintf("DAMAGE:%d:%d", event.GetGodetId(), event.GetLoopNo())
-						}
-						if seen[key] == event.GetState() {
-							continue
-						}
-						allow, upsert, gateErr := e.gateStorage(laneCtx, seen[key], key)
-						if gateErr != nil {
-							e.logger.Error("storage gate failed", "component", "alerting", "event_key", key, "reason", gateErr.Error())
-							e.reportFatal(fmt.Errorf("alert persistence: %w", gateErr))
-							continue
-						}
-						e.tracker.noteProcessed()
-						if !allow {
-							e.tracker.noteDropped()
-							e.metrics.AlertsDroppedCap.Add(1)
-							e.logger.Warn("storage cap reached; dropping event", "component", "alerting", "event_key", key)
-							continue
-						}
-						frame := runtime.evidenceFrame(event.GetEvidenceFrameId())
-						if frame.FrameID == "" {
-							frame = latest
-						}
-						godet := godets[event.GetGodetId()]
-						one := &inferencev2.GodetStateResponse{ModelVersion: state.GetModelVersion(), Godets: []*inferencev2.GodetState{godet}, Events: []*inferencev2.GodetAlertEvent{event}, Health: state.GetHealth()}
-						alerts, processErr := alerting.ProcessGodetState(laneCtx, one, frame, e.cfg.Storage.JPEGQuality, e.cfg.Storage.EvidencePath, e.store, time.Now)
-						if processErr != nil {
-							e.logger.Error("godet alert processing failed", "component", "alerting", "event_key", key, "reason", processErr.Error())
-							e.reportFatal(fmt.Errorf("alert persistence: %w", processErr))
-							continue
-						}
-						seen[key] = event.GetState()
-						if len(alerts) > 0 {
-							e.metrics.AlertsCreated.Add(uint64(len(alerts)))
-							if upsert {
-								e.tracker.noteUpserts(len(alerts))
-							} else {
-								e.tracker.noteStored(len(alerts))
-							}
-							e.logger.Info("godet alert upserted", "component", "alerting", "event_key", key, "state", event.GetState(), "loop", event.GetLoopNo())
-						}
-					}
-					return
-				}
-				frame := latest
-				for _, godet := range state.GetGodets() {
-					if godet == nil || (godet.GetState() != "pending" && godet.GetState() != "confirmed") {
-						continue
-					}
-					key := fmt.Sprintf("%d:%d", godet.GetGodetId(), godet.GetLastSeenLoop())
-					if seen[key] == godet.GetState() {
-						continue
-					}
-					eventKey := fmt.Sprintf("DAMAGE:%d:%d", godet.GetGodetId(), godet.GetLastSeenLoop())
-					allow, upsert, gateErr := e.gateStorage(laneCtx, seen[key], eventKey)
-					if gateErr != nil {
-						e.logger.Error("storage gate failed", "component", "alerting", "godet_id", godet.GetGodetId(), "reason", gateErr.Error())
-						e.reportFatal(fmt.Errorf("alert persistence: %w", gateErr))
-						continue
-					}
-					e.tracker.noteProcessed()
-					if !allow {
-						e.tracker.noteDropped()
-						e.metrics.AlertsDroppedCap.Add(1)
-						e.logger.Warn("storage cap reached; dropping event", "component", "alerting", "godet_id", godet.GetGodetId())
-						continue
-					}
-					one := &inferencev2.GodetStateResponse{ModelVersion: state.GetModelVersion(), Godets: []*inferencev2.GodetState{godet}, Health: state.GetHealth()}
-					alerts, processErr := alerting.ProcessGodetState(laneCtx, one, frame, e.cfg.Storage.JPEGQuality, e.cfg.Storage.EvidencePath, e.store, time.Now)
-					if processErr != nil {
-						e.logger.Error("godet alert processing failed", "component", "alerting", "godet_id", godet.GetGodetId(), "reason", processErr.Error())
-						e.reportFatal(fmt.Errorf("alert persistence: %w", processErr))
-						continue
-					}
-					seen[key] = godet.GetState()
-					if len(alerts) > 0 {
-						e.metrics.AlertsCreated.Add(uint64(len(alerts)))
-						if upsert {
-							e.tracker.noteUpserts(len(alerts))
-						} else {
-							e.tracker.noteStored(len(alerts))
-						}
-						e.logger.Info("godet alert upserted", "component", "alerting", "godet_id", godet.GetGodetId(), "state", godet.GetState(), "loop", godet.GetLastSeenLoop())
-					}
-				}
-			}
-			poll()
-			ticker := time.NewTicker(e.statePoll)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-laneCtx.Done():
-					return
-				case <-ticker.C:
-					poll()
-				}
-			}
-		}()
-	}
+	go func() {
+		defer runtimeWG.Done()
+		e.pollState(laneCtx, runtime, tracker)
+	}()
 	if scheduled {
-		go e.watchWindow(laneCtx, laneCancel)
+		go e.watchWindow(laneCtx, laneCancel, camera, schedule)
 	}
 	<-laneCtx.Done()
-	for _, rt := range runtimes {
-		rt.queue.Close()
-	}
+	runtime.queue.Close()
 	runtimeWG.Wait()
-	if scheduled && e.tracker.started() {
-		e.finishWindow()
+	if scheduled && tracker.started() {
+		e.finishWindow(camera, tracker)
 	}
 }
 
-// watchWindow ends the lane when the operating window closes.
-func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.CancelFunc) {
+// pollState polls the camera's Tier-2 state and turns its events into stored alerts.
+func (e *laneEnv) pollState(laneCtx context.Context, runtime *cameraRuntime, tracker *windowTracker) {
+	cameraID := runtime.camera.ID
+	seen := make(map[string]string)
+	var stateFailureSince time.Time
+	poll := func() {
+		ctx, cancel := context.WithTimeout(laneCtx, e.requestTimeout)
+		state, err := e.model.GetGodetState(ctx, &inferencev2.GodetStateRequest{IncludeHistory: true, CameraId: cameraID})
+		cancel()
+		polledAt := time.Now().UTC()
+		if err != nil {
+			e.setCameraReady(cameraID, false, true)
+			e.metrics.DependencyFailures.Add(1)
+			tracker.notePollError()
+			e.logger.Warn("godet state poll failed", "component", "alerting", "camera_id", cameraID, "reason", err.Error())
+			e.status.UpdateCamera(cameraID, func(s *web.ModelStatus) {
+				at := polledAt
+				s.Ready = false
+				s.LastPollAt = &at
+				s.LastError = err.Error()
+			})
+			if stateFailureSince.IsZero() {
+				stateFailureSince = time.Now()
+			}
+			if e.dependencyTO > 0 && time.Since(stateFailureSince) >= e.dependencyTO {
+				e.reportFatal(fmt.Errorf("%w: godet state: %v", errDependencyTimeout, err))
+			}
+			return
+		}
+		stateFailureSince = time.Time{}
+		e.setCameraReady(cameraID, state.GetHealth().GetReady(), true)
+		tracker.noteVersion(state.GetModelVersion())
+		counters := make(map[string]float64, len(state.GetHealth().GetCounters()))
+		for k, v := range state.GetHealth().GetCounters() {
+			counters[k] = v
+		}
+		snap := tracker.snapshot()
+		e.status.UpdateCamera(cameraID, func(s *web.ModelStatus) {
+			at := polledAt
+			s.Ready = state.GetHealth().GetReady()
+			s.LoopLocked = state.GetHealth().GetLoopLocked()
+			s.Status = state.GetHealth().GetStatus()
+			s.Detail = state.GetHealth().GetDetail()
+			s.ModelVersion = state.GetModelVersion()
+			s.Counters = counters
+			s.StoredAlerts = snap.storedTotal
+			s.MaxAlerts = e.maxAlerts()
+			if snap.capReached {
+				if s.Detail == "" {
+					s.Detail = "storage cap reached"
+				} else {
+					s.Detail += " · storage cap reached"
+				}
+			}
+			s.LastPollAt = &at
+			s.LastError = ""
+		})
+		latest := runtime.latestFrame()
+		if latest.FrameID == "" {
+			return
+		}
+		if len(state.GetEvents()) > 0 {
+			godets := make(map[int32]*inferencev2.GodetState, len(state.GetGodets()))
+			for _, godet := range state.GetGodets() {
+				if godet != nil {
+					godets[godet.GetGodetId()] = godet
+				}
+			}
+			for _, event := range state.GetEvents() {
+				if event == nil || (event.GetState() != "pending" && event.GetState() != "confirmed") {
+					continue
+				}
+				key := event.GetEventKey()
+				if key == "" {
+					key = alerting.EventKey(cameraID, event.GetGodetId(), event.GetLoopNo())
+				}
+				if seen[key] == event.GetState() {
+					continue
+				}
+				if seen[key] == "" {
+					// first sight in this lane: an event stored before a restart in the same
+					// state keeps its original evidence
+					stored, found, stateErr := e.store.EventState(laneCtx, key)
+					if stateErr == nil && found && stored == event.GetState() {
+						seen[key] = event.GetState()
+						continue
+					}
+				}
+				allow, upsert, gateErr := e.gateStorage(laneCtx, seen[key], key)
+				if gateErr != nil {
+					e.logger.Error("storage gate failed", "component", "alerting", "event_key", key, "reason", gateErr.Error())
+					e.reportFatal(fmt.Errorf("alert persistence: %w", gateErr))
+					continue
+				}
+				tracker.noteProcessed()
+				if !allow {
+					tracker.noteDropped()
+					e.metrics.AlertsDroppedCap.Add(1)
+					e.logger.Warn("storage cap reached; dropping event", "component", "alerting", "event_key", key)
+					continue
+				}
+				frame := runtime.evidenceFrame(event.GetEvidenceFrameId())
+				if frame.FrameID == "" {
+					if event.GetEvidenceFrameId() != "" {
+						e.logger.Warn("evidence frame no longer cached; using the live frame", "component", "alerting", "camera_id", cameraID, "event_key", key)
+					}
+					frame = latest
+				}
+				godet := godets[event.GetGodetId()]
+				if godet == nil {
+					godet = &inferencev2.GodetState{GodetId: event.GetGodetId(), State: event.GetState(), LastSeenLoop: event.GetLoopNo()}
+				}
+				one := &inferencev2.GodetStateResponse{ModelVersion: state.GetModelVersion(), Godets: []*inferencev2.GodetState{godet}, Events: []*inferencev2.GodetAlertEvent{event}, Health: state.GetHealth()}
+				alerts, processErr := alerting.ProcessGodetState(laneCtx, one, frame, e.cfg.Storage.JPEGQuality, e.cfg.Storage.EvidencePath, e.store, time.Now)
+				if processErr != nil {
+					e.logger.Error("godet alert processing failed", "component", "alerting", "event_key", key, "reason", processErr.Error())
+					e.reportFatal(fmt.Errorf("alert persistence: %w", processErr))
+					continue
+				}
+				seen[key] = event.GetState()
+				if len(alerts) > 0 {
+					e.metrics.AlertsCreated.Add(uint64(len(alerts)))
+					if upsert {
+						tracker.noteUpserts(len(alerts))
+					} else {
+						tracker.noteStored(len(alerts))
+					}
+					e.logger.Info("godet alert upserted", "component", "alerting", "camera_id", cameraID, "event_key", key, "state", event.GetState(), "loop", event.GetLoopNo())
+				}
+			}
+			return
+		}
+		frame := latest
+		for _, godet := range state.GetGodets() {
+			if godet == nil || (godet.GetState() != "pending" && godet.GetState() != "confirmed") {
+				continue
+			}
+			key := fmt.Sprintf("%d:%d", godet.GetGodetId(), godet.GetLastSeenLoop())
+			if seen[key] == godet.GetState() {
+				continue
+			}
+			eventKey := alerting.EventKey(cameraID, godet.GetGodetId(), godet.GetLastSeenLoop())
+			allow, upsert, gateErr := e.gateStorage(laneCtx, seen[key], eventKey)
+			if gateErr != nil {
+				e.logger.Error("storage gate failed", "component", "alerting", "godet_id", godet.GetGodetId(), "reason", gateErr.Error())
+				e.reportFatal(fmt.Errorf("alert persistence: %w", gateErr))
+				continue
+			}
+			tracker.noteProcessed()
+			if !allow {
+				tracker.noteDropped()
+				e.metrics.AlertsDroppedCap.Add(1)
+				e.logger.Warn("storage cap reached; dropping event", "component", "alerting", "godet_id", godet.GetGodetId())
+				continue
+			}
+			one := &inferencev2.GodetStateResponse{ModelVersion: state.GetModelVersion(), Godets: []*inferencev2.GodetState{godet}, Health: state.GetHealth()}
+			alerts, processErr := alerting.ProcessGodetState(laneCtx, one, frame, e.cfg.Storage.JPEGQuality, e.cfg.Storage.EvidencePath, e.store, time.Now)
+			if processErr != nil {
+				e.logger.Error("godet alert processing failed", "component", "alerting", "godet_id", godet.GetGodetId(), "reason", processErr.Error())
+				e.reportFatal(fmt.Errorf("alert persistence: %w", processErr))
+				continue
+			}
+			seen[key] = godet.GetState()
+			if len(alerts) > 0 {
+				e.metrics.AlertsCreated.Add(uint64(len(alerts)))
+				if upsert {
+					tracker.noteUpserts(len(alerts))
+				} else {
+					tracker.noteStored(len(alerts))
+				}
+				e.logger.Info("godet alert upserted", "component", "alerting", "godet_id", godet.GetGodetId(), "state", godet.GetState(), "loop", godet.GetLastSeenLoop())
+			}
+		}
+	}
+	poll()
+	ticker := time.NewTicker(e.statePoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-laneCtx.Done():
+			return
+		case <-ticker.C:
+			poll()
+		}
+	}
+}
+
+// watchWindow ends the camera's lane when its operating window closes.
+func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.CancelFunc, camera config.CameraConfig, schedule config.ScheduleConfig) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -660,8 +741,8 @@ func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.Cancel
 		case <-laneCtx.Done():
 			return
 		case <-ticker.C:
-			if !e.cfg.Schedule.Contains(time.Now().In(e.loc)) {
-				e.logger.Info("operating window closed; stopping lanes", "component", "pipeline")
+			if !schedule.Contains(time.Now().In(e.loc)) {
+				e.logger.Info("operating window closed; stopping lane", "component", "pipeline", "camera_id", camera.ID)
 				laneCancel()
 				return
 			}
@@ -669,16 +750,17 @@ func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.Cancel
 	}
 }
 
-// finishWindow persists the window stats sidecar and generates the markdown
-// night report next to the SQLite database.
-func (e *laneEnv) finishWindow() {
-	snap := e.tracker.snapshot()
+// finishWindow persists the camera's window stats sidecar and generates its markdown
+// report next to the SQLite database.
+func (e *laneEnv) finishWindow(camera config.CameraConfig, tracker *windowTracker) {
+	snap := tracker.snapshot()
 	if snap.start.IsZero() {
 		return
 	}
 	end := time.Now()
-	last := e.status.Get()
+	last := e.status.Camera(camera.ID)
 	stats := report.WindowStats{
+		CameraID:    camera.ID,
 		WindowStart: snap.start, WindowEnd: end,
 		ProcessedEvents: snap.processed, Stored: snap.stored,
 		DroppedCap: snap.droppedCap, Upsets: snap.upserts,
@@ -686,7 +768,7 @@ func (e *laneEnv) finishWindow() {
 		LastStatus: last.Status, LastDetail: last.Detail, Counters: last.Counters,
 		ModelVersions: snap.versions, MaxAlerts: e.maxAlerts(),
 	}
-	statsPath, reportPath := nightReportPaths(e.cfg.Storage.SQLitePath, snap.start)
+	statsPath, reportPath := windowReportPaths(e.cfg.Storage.SQLitePath, camera.ID, snap.start)
 	if data, err := json.MarshalIndent(stats, "", "  "); err != nil {
 		e.logger.Error("window stats encode failed", "component", "pipeline", "reason", err.Error())
 	} else if err := os.MkdirAll(filepath.Dir(statsPath), 0o750); err != nil {
@@ -694,14 +776,14 @@ func (e *laneEnv) finishWindow() {
 	} else if err := os.WriteFile(statsPath, data, 0o644); err != nil {
 		e.logger.Error("window stats write failed", "component", "pipeline", "reason", err.Error())
 	} else {
-		e.logger.Info("window stats written", "component", "pipeline", "path", statsPath)
+		e.logger.Info("window stats written", "component", "pipeline", "camera_id", camera.ID, "path", statsPath)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := report.Generate(ctx, e.store, stats, reportPath); err != nil {
-		e.logger.Error("night report failed", "component", "pipeline", "reason", err.Error())
+		e.logger.Error("window report failed", "component", "pipeline", "camera_id", camera.ID, "reason", err.Error())
 	} else {
-		e.logger.Info("night report written", "component", "pipeline", "path", reportPath,
+		e.logger.Info("window report written", "component", "pipeline", "camera_id", camera.ID, "path", reportPath,
 			"stored", snap.stored, "dropped_cap", snap.droppedCap)
 	}
 }
@@ -789,11 +871,10 @@ func main() {
 		logger.Error("no enabled camera configured", "component", "pipeline")
 		os.Exit(1)
 	}
-	tracker := newWindowTracker()
 	env := &laneEnv{
 		cfg: cfg, logger: logger, health: healthHandler, metrics: metricHandler,
 		status: statusStore, store: alertStore, model: modelClient, loc: loc,
-		reportFatal: reportFatal, tracker: tracker,
+		reportFatal: reportFatal,
 		dependencyTO:   dependencyTimeout,
 		requestTimeout: time.Duration(cfg.Model.RequestTimeoutSeconds) * time.Second,
 		statePoll:      time.Duration(cfg.Model.StatePollSeconds) * time.Second,

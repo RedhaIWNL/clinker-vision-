@@ -166,7 +166,8 @@ $("syslabel").textContent=!st.last_poll_at?"Starting":!st.ready?(st.status||"not
 $("sysver").textContent=st.model_version||"";
 const det=[];det.push(st.loop_locked?"Loop locked":"Loop open");if(st.last_poll_at)det.push("poll "+fmtAge(st.last_poll_at));
 if(st.counters&&st.counters.frames_total!=null)det.push(Number(st.counters.frames_total).toLocaleString("en-US")+" frames");
-$("healthnote").textContent=det.join(" · ")+(st.detail?". "+st.detail:"")+(st.last_error?". Last poll error: "+st.last_error:"");
+let cams="";if(st.cameras&&st.cameras.length>1){cams=st.cameras.map(c=>c.camera_id+": "+String(c.status||"").replace(/_/g," ")+(c.counters&&c.counters.frames_total!=null&&c.status!=="standby"?" ("+Number(c.counters.frames_total).toLocaleString("en-US")+" frames)":"")).join(" | ")+". ";}
+$("healthnote").textContent=cams+(st.camera_id?st.camera_id+": ":"")+det.join(" · ")+(st.detail?". "+st.detail:"")+(st.last_error?". Last poll error: "+st.last_error:"");
 }catch(e){$("syshealth").className="sys bad";$("syslabel").textContent="Unreachable";$("healthnote").textContent=String(e.message||e);}}
 /* ---- alarm list ---- */
 function visible(){const out=[];for(const id of store.order){const a=store.items.get(id);if(!a)continue;

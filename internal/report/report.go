@@ -17,6 +17,8 @@ import (
 // WindowStats carries the pipeline counters for the reported window.
 // MaxAlerts is the storage cap (0 means unlimited).
 type WindowStats struct {
+	// CameraID limits the report to one camera's alerts ("" = all cameras).
+	CameraID        string             `json:"camera_id,omitempty"`
 	WindowStart     time.Time          `json:"window_start"`
 	WindowEnd       time.Time          `json:"window_end"`
 	ProcessedEvents int                `json:"processed_events"`
@@ -57,6 +59,7 @@ func Generate(ctx context.Context, alertStore *store.Store, stats WindowStats, o
 			return err
 		}
 		result, err := alertStore.ListAlerts(ctx, store.ListFilter{
+			CameraID:         stats.CameraID,
 			Since:            since,
 			BeforeDetectedAt: beforeDetectedAt,
 			BeforeAlertID:    beforeAlertID,
@@ -138,7 +141,11 @@ func Generate(ctx context.Context, alertStore *store.Store, stats WindowStats, o
 	}
 
 	var b strings.Builder
-	b.WriteString("# Night report\n\n")
+	if stats.CameraID != "" {
+		b.WriteString(fmt.Sprintf("# %s window report\n\n", stats.CameraID))
+	} else {
+		b.WriteString("# Night report\n\n")
+	}
 	b.WriteString(fmt.Sprintf("Window: %s to %s\n\n", stats.WindowStart.Format(time.RFC3339), stats.WindowEnd.Format(time.RFC3339)))
 	b.WriteString(fmt.Sprintf("Model versions: %s\n\n", modelLine))
 	b.WriteString(fmt.Sprintf("Total alerts: %d\n\n", len(filtered)))

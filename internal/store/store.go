@@ -360,6 +360,23 @@ func (s *Store) HasEventKey(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// EventState returns the stored alert_state of an event key ("" and false when absent).
+// A pipeline restart replays the model's current events; an event already stored in
+// the same state is skipped, so its original evidence frame is not replaced.
+func (s *Store) EventState(ctx context.Context, key string) (string, bool, error) {
+	if key == "" {
+		return "", false, nil
+	}
+	var state sql.NullString
+	if err := s.db.QueryRowContext(ctx, "SELECT alert_state FROM alerts WHERE event_key = ? LIMIT 1", key).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("event state: %w", err)
+	}
+	return state.String, true, nil
+}
+
 func (s *Store) MarkSeen(ctx context.Context, alertID string, seenAt time.Time) (*time.Time, error) {
 	if _, err := s.db.ExecContext(ctx, "UPDATE alerts SET seen_at = COALESCE(seen_at, ?) WHERE alert_id = ?", formatTime(seenAt), alertID); err != nil {
 		return nil, fmt.Errorf("mark alert seen: %w", err)

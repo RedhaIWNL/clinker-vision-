@@ -245,3 +245,54 @@ func writeConfig(t *testing.T, contents string) string {
 	}
 	return path
 }
+
+func TestValidateAcceptsCAM4WithItsOwnSchedule(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cameras[3].Enabled = true
+	cfg.Cameras[3].NVRRTSPURL = "rtsp://nvr.example.local:554/cam/realmonitor?channel=4&subtype=0"
+	cfg.Cameras[3].Schedule = &ScheduleConfig{Enabled: true, Start: "09:00", Stop: "16:00", Timezone: "Africa/Casablanca"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("CAM-4 should be accepted: %v", err)
+	}
+	day := cfg.ScheduleFor(cfg.Cameras[3])
+	if day.Start != "09:00" || day.Stop != "16:00" {
+		t.Fatalf("CAM-4 should use its own schedule, got %+v", day)
+	}
+	if got := cfg.ScheduleFor(cfg.Cameras[0]); got != cfg.Schedule {
+		t.Fatalf("CAM-1 without its own schedule should follow the global one, got %+v", got)
+	}
+}
+
+func TestValidateRejectsBadCameraSchedule(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cameras[3].Schedule = &ScheduleConfig{Enabled: true, Start: "9am", Stop: "16:00", Timezone: "Africa/Casablanca"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "CAM-4") {
+		t.Fatalf("expected CAM-4 schedule error, got %v", err)
+	}
+}
+
+func TestLoadCameraScheduleFromYAML(t *testing.T) {
+	data := `cameras:
+  - {id: CAM-1, enabled: true, nvr_rtsp_url: "rtsp://nvr.example.local:554/cam/realmonitor?channel=1", sample_interval_seconds: 1, queue_capacity: 64}
+  - {id: CAM-2, enabled: false, sample_interval_seconds: 1, queue_capacity: 64}
+  - {id: CAM-3, enabled: false, sample_interval_seconds: 1, queue_capacity: 64}
+  - id: CAM-4
+    enabled: true
+    nvr_rtsp_url: "rtsp://nvr.example.local:554/cam/realmonitor?channel=4&subtype=0"
+    sample_interval_seconds: 1
+    queue_capacity: 64
+    schedule: {enabled: true, start: "09:00", stop: "16:00", timezone: "Africa/Casablanca"}
+  - {id: CAM-5, enabled: false, sample_interval_seconds: 1, queue_capacity: 64}
+  - {id: CAM-6, enabled: false, sample_interval_seconds: 1, queue_capacity: 64}
+`
+	cfg, err := Load(writeConfig(t, data))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Cameras[3].Schedule == nil || cfg.Cameras[3].Schedule.Start != "09:00" {
+		t.Fatalf("CAM-4 schedule not loaded: %+v", cfg.Cameras[3].Schedule)
+	}
+	if cfg.Cameras[0].Schedule != nil {
+		t.Fatal("CAM-1 has no schedule of its own")
+	}
+}
