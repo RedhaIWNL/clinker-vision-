@@ -266,6 +266,16 @@ movement unreadable: camera moved, blocked or too dark),
 `lost the chain map: re-locking`, and `POPULATION` (more than 15 % of godets
 confirmed: check lighting or view before trusting alerts).
 
+### CAM-3 (prepared, not yet calibrated)
+
+CAM-3 sees the other side of the same chain, mirrored. The pipeline accepts
+`CAM-3` (same frame rules, alerts `CAM-3:DAMAGE:<godet>:<loop>`, report
+`CAM-3-day-<date>.md`) and the model can run one side-plate engine per camera
+(`--sideplate-bundle-dir model/cam3`, repeatable). There is **no CAM-3 bundle
+yet**: it needs the full-hour footage and labels described in the calibration
+repo's `CAM3_DAY_PLAN.md`. Until then keep CAM-3 disabled; enabled without a
+bundle, its frames are dead-lettered and its status poll reports "not enabled".
+
 ## Current integration boundary
 
 CAM-1 and CAM-4 are the enabled dense lanes (each with its own sequence
