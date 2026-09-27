@@ -95,6 +95,17 @@ class Store:
                     "computed": computed, "loops": loops, "loop_starts": loop_starts,
                     "tail": tail}
 
+    def save_kv(self, key, value):
+        """Free-form JSON value (CAM-4 keeps its whole snapshot under 'cam4_*' keys)."""
+        with self._lock:
+            self.con.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, json.dumps(value)))
+            self.con.commit()
+
+    def load_kv(self, key):
+        with self._lock:
+            row = self.con.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return None if row is None else json.loads(row[0])
+
     def close(self):
         with self._lock:
             self.con.close()

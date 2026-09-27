@@ -2,13 +2,16 @@
 
 Run:  python -m pytest tests/test_pipeline.py -q
 """
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-CAM = ROOT.parent
+# Calibration repo (videos, out/h00): the parent dir, or CLINKER_CALIB_ROOT when the
+# service lives inside the system repo.
+CAM = Path(os.environ.get("CLINKER_CALIB_ROOT", ROOT.parent))
 sys.path.insert(0, str(ROOT))
 
 from src.bundle import load_bundle  # noqa: E402

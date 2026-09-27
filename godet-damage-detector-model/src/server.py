@@ -9,8 +9,14 @@ Sequencing (real mode): frames are released to the detector strictly in
 sequence_no order. A jump holds later frames (up to REORDER_WINDOW=64); a gap
 still missing after 64 subsequent arrivals is declared dropped and converted to
 virtual slots (nominal 25 fps / 0.8 s period). Late frames (seq < expected) are
-counted and skipped. Per-frame input errors dead-letter the frame (log +
-counter, NO response, stream stays up); only server-side failures abort streams.
+counted and skipped; a sequence_no that falls back by more than the window is
+a sender restart (new decoder, new operating window): the lane starts counting
+again instead of dropping every frame as late. Per-frame input errors
+dead-letter the frame (log + counter, NO response, stream stays up); only
+server-side failures abort streams.
+
+CAM-4 (day side plates) is optional (--cam4-bundle-dir): its frames take their
+own ordering lane and pipeline (src/cam4), so they never disturb CAM-1.
 """
 from __future__ import annotations
 
@@ -80,6 +86,28 @@ def tier1_from_dict(pb2_mod, frame_id: str, model_version: str, d: dict):
     return r
 
 
+def tier1_cam4(pb2_mod, frame_id: str, model_version: str, d: dict, retained=()):
+    """CAM-4 Tier-1: chain measurements, never detections (alerts are Tier-2), plus any
+    earlier frames the engine wants kept as evidence."""
+    import datetime
+
+    r = pb2_mod.InferenceResponse()
+    r.frame_id = frame_id
+    for k in ("chain_step", "chain_pos", "match_quality", "chain_status"):
+        if k in d and d[k] == d[k]:
+            r.scalar_measurements[k] = float(d[k])
+    for rec in retained:
+        f = r.retained_frames.add()
+        f.frame_id = rec["frame_id"]
+        f.sequence_no = rec["sequence_no"]
+        if rec["captured_at"] is not None:
+            f.captured_at.CopyFrom(rec["captured_at"])
+        f.image_data = rec["jpeg"]
+    r.model_version = model_version
+    r.processed_at.FromDatetime(datetime.datetime.now(datetime.timezone.utc))
+    return r
+
+
 class MockServicer(pb2_grpc.InferenceServiceServicer):
     """Canned responder used for deterministic integration tests."""
 
@@ -124,7 +152,8 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
     bundle version matches (else a fresh history begins)."""
 
     def __init__(self, bundle_dir: str, max_jpeg_bytes: int, store_path: str,
-                 health_servicer, frame_deadline_s: float = 5.0):
+                 health_servicer, frame_deadline_s: float = 5.0,
+                 cam4_bundle_dir: str | None = None):
         from src.alerts import AlertTracker
         from src.bundle import load_bundle
         from src.identity import StreamingIdentity
@@ -149,6 +178,11 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
                                        self.bundle.rules)
         self.alerts = AlertTracker(self.bundle.rules, self.bundle.lines)
         self.store = Store(store_path)
+        # CAM-4 (day side plates): optional second pipeline with its own lane and bundle.
+        self.cam4 = None
+        if cam4_bundle_dir:
+            from src.cam4.engine import Cam4Engine
+            self.cam4 = Cam4Engine(cam4_bundle_dir, self.store)  # BundleError: fail startup
         self.health_servicer = health_servicer
         self.serving = False
         self.max_jpeg_bytes = max_jpeg_bytes
@@ -156,7 +190,7 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
         self.hold = {}             # seq -> req (reorder window)
         self.counters = {"frames_total": 0, "dead_letters_total": 0,
                          "sequence_gaps_total": 0, "late_frames_total": 0,
-                         "deadline_exceeded_total": 0}
+                         "deadline_exceeded_total": 0, "sequence_restarts_total": 0}
         self._lock = threading.Lock()
         self._tier2_key = None  # last logged (locked, resyncing, chain) triple
         self.frame_deadline_s = frame_deadline_s
@@ -202,6 +236,8 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
             self._saved_rows = len(asnap["rows"])
         except Exception as e:
             LOG.error("snapshot failed: %s", e)
+        if self.cam4 is not None:
+            self.cam4.persist()
 
     def _snapshot_periodic(self):
         if self.pipe.slot - self._snap_slot >= self.SNAP_EVERY:
@@ -279,12 +315,49 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
         with self._lock:
             self.counters[key] += 1
 
+    def _release_cam4(self, req, out):
+        """CAM-4 twin of _release: size check, decode+measure, deadline, Tier-1 response."""
+        c4 = self.cam4
+        if len(req.image_data) > self.max_jpeg_bytes:
+            c4._bump("dead_letters_total")
+            LOG.warning("dead-letter CAM-4 frame_id=%s reason=oversized jpeg", req.frame_id)
+            return
+        t0 = time.time()
+        captured = req.captured_at if req.HasField("captured_at") else None
+        d, ok = c4.on_frame(req.image_data, req.frame_id, req.sequence_no, captured)
+        dt = time.time() - t0
+        if not ok:
+            c4._bump("dead_letters_total")
+            LOG.warning("dead-letter CAM-4 frame_id=%s reason=undecodable or wrong-size jpeg", req.frame_id)
+            return
+        if dt > self.frame_deadline_s:
+            c4._bump("deadline_exceeded_total")
+            LOG.warning("deadline CAM-4 frame_id=%s took %.2fs > %.2fs: counted, no response",
+                        req.frame_id, dt, self.frame_deadline_s)
+            return
+        out.append(tier1_cam4(pb2, req.frame_id, c4.version, d, c4.take_retained()))
+
     def Infer(self, request_iterator, context):
         out = []
         for req in request_iterator:
             if not context.is_active():
                 break
+            if req.camera_id == "CAM-4" and self.cam4 is not None:
+                # own lane: CAM-4 sequence_no never disturbs CAM-1 ordering
+                self.cam4.sequence(req, lambda r: self._release_cam4(r, out))
+                for r in out:
+                    yield r
+                out.clear()
+                continue
             seq = req.sequence_no
+            if self.expected is not None and seq + REORDER_WINDOW < self.expected:
+                # sender restarted (new decoder / new operating window): count again
+                # from here; identity re-aligns through its normal resync path.
+                LOG.warning("sequence restart: seq %d after expected %d (sender restarted)",
+                            seq, self.expected)
+                self._bump("sequence_restarts_total")
+                self.hold.clear()
+                self.expected = None
             if self.expected is None:
                 self.expected = seq
             if seq < self.expected:
@@ -316,6 +389,14 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
         import numbers
         import pandas as pd
 
+        cam = request.camera_id or "CAM-1"
+        if cam == "CAM-4":
+            if self.cam4 is None:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                              "CAM-4 not enabled on this server (start with --cam4-bundle-dir)")
+            return self.cam4.godet_state(request, pb2)
+        if cam not in SUPPORTED_CAMERAS:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"unknown camera_id {cam}")
         with self._lock:
             A = self.alerts.alerts
             S = self.alerts.splay
@@ -323,6 +404,7 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
             rows = list(self.alerts.rows)
         r = pb2.GodetStateResponse()
         r.model_version = self.bundle.version
+        r.camera_id = "CAM-1"
         conf = set(A[A["status"] == "confirmed"]["godet_id"]) | set(
             S[S["status"] == "confirmed"]["godet_id"]) if len(A) or len(S) else set()
         pend = set(A[A["status"] == "pending"]["godet_id"]) | set(
@@ -429,7 +511,8 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
 
 def create_server(bind: str, max_jpeg_bytes: int, bundle_dir: str | None,
                   mock: bool, store_path: str = "state/store.db",
-                  frame_deadline_s: float = 5.0) -> grpc.Server:
+                  frame_deadline_s: float = 5.0,
+                  cam4_bundle_dir: str | None = None) -> grpc.Server:
     from grpc_health.v1 import health as health_mod
     from grpc_health.v1 import health_pb2, health_pb2_grpc
 
@@ -442,7 +525,7 @@ def create_server(bind: str, max_jpeg_bytes: int, bundle_dir: str | None,
         health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
     else:
         servicer = RealServicer(bundle_dir, max_jpeg_bytes, store_path,
-                                health_servicer, frame_deadline_s)
+                                health_servicer, frame_deadline_s, cam4_bundle_dir)
         # Real mode starts NOT_SERVING; flips on first loop lock (Phase 3 rule:
         # SERVING ⇔ loop locked). Until then Tier-1 flows, Tier-2 says not_ready.
         health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
@@ -457,6 +540,8 @@ def main() -> int:
     ap.add_argument("--bind", default="0.0.0.0:50051")
     ap.add_argument("--mock", action="store_true", help="canned responses (no CV)")
     ap.add_argument("--bundle-dir", default=None, help="model/ bundle for real mode")
+    ap.add_argument("--cam4-bundle-dir", default=None,
+                    help="model/cam4 bundle: also serve CAM-4 (day side plates)")
     ap.add_argument("--store-path", default="state/store.db",
                     help="SQLite snapshot path (restart recovery)")
     ap.add_argument("--max-jpeg-bytes", type=int, default=DEFAULT_MAX_JPEG_BYTES)
@@ -479,7 +564,7 @@ def main() -> int:
 
     try:
         server = create_server(a.bind, a.max_jpeg_bytes, a.bundle_dir, a.mock,
-                               a.store_path, a.frame_deadline_s)
+                               a.store_path, a.frame_deadline_s, a.cam4_bundle_dir)
     except Exception as e:  # BundleError etc: fail startup loudly, non-zero
         LOG.error("startup failed: %s", e)
         return 1
@@ -488,6 +573,8 @@ def main() -> int:
     server.start()
     LOG.info("startup bind=%s mode=%s model_version=%s max_jpeg_bytes=%d",
              a.bind, mode, ver, a.max_jpeg_bytes)
+    if not a.mock and getattr(server.servicer, "cam4", None) is not None:
+        LOG.info("CAM-4 enabled model_version=%s", server.servicer.cam4.version)
 
     stop = threading.Event()
 

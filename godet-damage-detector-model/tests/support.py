@@ -2,6 +2,7 @@
 logic is testable without video decode (fast). t_wall is synthetic but
 monotonic (slot * 0.8 s): health rate rules see a well-formed stream.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-CAM = ROOT.parent
+# Calibration repo (videos, out/h00): the parent dir, or CLINKER_CALIB_ROOT when the
+# service lives inside the system repo.
+CAM = Path(os.environ.get("CLINKER_CALIB_ROOT", ROOT.parent))
 sys.path.insert(0, str(ROOT))
 
 from src.pipeline import SlotRecord  # noqa: E402

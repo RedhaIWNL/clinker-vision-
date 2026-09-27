@@ -5,6 +5,7 @@ Run:  python -m pytest tests/test_bundle.py -q -s
 """
 import hashlib
 import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,9 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CAM = ROOT.parent
+# Calibration repo (videos, out/h00): the parent dir, or CLINKER_CALIB_ROOT when the
+# service lives inside the system repo.
+CAM = Path(os.environ.get("CLINKER_CALIB_ROOT", ROOT.parent))
 sys.path.insert(0, str(ROOT / "src" / "gen"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(CAM))

@@ -13,6 +13,7 @@ pytestmark = pytest.mark.skip(
     reason="SLOW (~9 min H.264 decode): deferred, not dropped. Re-enable before "
            "Phase 2 sign-off — the JPEG-drift gate (<=2 rows) is still an exit item.")
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +22,9 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-CAM = ROOT.parent
+# Calibration repo (videos, out/h00): the parent dir, or CLINKER_CALIB_ROOT when the
+# service lives inside the system repo.
+CAM = Path(os.environ.get("CLINKER_CALIB_ROOT", ROOT.parent))
 sys.path.insert(0, str(ROOT))
 
 from src.bundle import load_bundle  # noqa: E402
