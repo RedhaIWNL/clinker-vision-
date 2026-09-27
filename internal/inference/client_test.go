@@ -222,7 +222,7 @@ func (s *failOnceService) GetGodetState(context.Context, *inferencev2.GodetState
 func TestValidateResponseForCameraCAM4(t *testing.T) {
 	ok := &inferencev2.InferenceResponse{FrameId: "f", ModelVersion: "m", ProcessedAt: timestamppb.Now(),
 		ScalarMeasurements: map[string]float32{"chain_step": 8.1, "chain_pos": 1000, "match_quality": 0.7, "chain_status": 0},
-		RetainedFrames: []*inferencev2.RetainedFrame{{FrameId: "550e8400-e29b-41d4-a716-446655440001", ImageData: []byte{1}, CapturedAt: timestamppb.Now()}}}
+		RetainedFrames:     []*inferencev2.RetainedFrame{{FrameId: "550e8400-e29b-41d4-a716-446655440001", ImageData: []byte{1}, CapturedAt: timestamppb.Now()}}}
 	if _, err := ValidateResponseForCamera("f", "CAM-4", ok); err != nil {
 		t.Fatalf("valid CAM-4 response rejected: %v", err)
 	}

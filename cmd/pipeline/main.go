@@ -874,7 +874,7 @@ func main() {
 	env := &laneEnv{
 		cfg: cfg, logger: logger, health: healthHandler, metrics: metricHandler,
 		status: statusStore, store: alertStore, model: modelClient, loc: loc,
-		reportFatal: reportFatal,
+		reportFatal:    reportFatal,
 		dependencyTO:   dependencyTimeout,
 		requestTimeout: time.Duration(cfg.Model.RequestTimeoutSeconds) * time.Second,
 		statePoll:      time.Duration(cfg.Model.StatePollSeconds) * time.Second,

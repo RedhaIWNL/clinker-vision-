@@ -68,12 +68,19 @@ func (d Decoder) Run(ctx context.Context, emit func(Frame) error) error {
 		"-hide_banner",
 		"-loglevel", "error",
 		"-nostdin",
+	}
+	if strings.HasPrefix(strings.ToLower(d.Source), "rtsp://") {
+		// RTP over the RTSP TCP connection: the default UDP transport loses the
+		// large 4 MP frames or never arrives through Docker's NAT.
+		args = append(args, "-rtsp_transport", "tcp")
+	}
+	args = append(args,
 		"-i", d.Source,
 		"-map", "0:v:0",
 		"-an",
 		"-c:v", "mjpeg",
 		"-q:v", "3",
-	}
+	)
 	if d.MaxFrames > 0 {
 		args = append(args, "-frames:v", strconv.Itoa(d.MaxFrames))
 	}
