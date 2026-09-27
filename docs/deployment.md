@@ -218,13 +218,68 @@ To prove the full cycle today without waiting for night, use a 10-minute
 test window in a scratch config (never commit it), watch idle → start →
 stop → report appear, then restore the real window.
 
+## Day run: CAM-4 side plates
+
+CAM-4 looks at the outside side plates by day and flags a godet whose plate does
+not tuck under its neighbour (raised lip with a dark gap under it). It is a
+second dense lane with its **own hours**, so CAM-1 keeps its night window and
+CAM-4 runs by day in the same, always-running pipeline:
+
+```yaml
+  - id: "CAM-4"
+    enabled: true
+    nvr_rtsp_url: "rtsp://admin:<password>@192.168.1.200:554/cam/realmonitor?channel=4&subtype=0"
+    sample_interval_seconds: 1
+    queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "09:00"
+      stop: "16:00"
+      timezone: "Africa/Casablanca"
+```
+
+NVR channel 4 is camera 192.168.1.144 (DH-IPC-HFW2441T-ZS). Use the main stream
+(`subtype=0`, 2688×1520); the model refuses any other frame size. The model
+container loads the CAM-4 bundle from `godet-damage-detector-model/model/cam4`
+(`--cam4-bundle-dir` in `docker-compose.yml`).
+
+What to expect after the window opens:
+
+- about 1 minute: the chain is found on the chain map (`loop locked`);
+- about 4 minutes: enough passes to judge (`history building` disappears);
+- about 20 minutes (one chain loop plus a few minutes): the first confirmed
+  godets. A godet is confirmed only when it is strong on at least 2 passes.
+
+The status card shows one line per camera (`CAM-1: standby | CAM-4: ok`). CAM-4
+alerts carry the camera prefix in their key (`CAM-4:DAMAGE:<godet>:<loop>`), a
+box on the fault spot, and `severity` / `passes_seen` instead of `lip`. At the
+end of each day window the pipeline writes `data/CAM-4-day-<date>.stats.json`
+and `data/reports/CAM-4-day-<date>.md`; CAM-1 keeps its `night-<date>` names.
+The 1000-alert cap is shared by both cameras.
+
+CAM-4 godet numbers are the chain-map numbers used on the review pages
+(0–1209), except that godet 0 is reported as **1210** (the system treats 0 as
+"no godet"; on a 1,210-godet loop they are the same godet).
+
+Health messages specific to CAM-4: `conveyor stopped`, `VIEW LOST` (chain
+movement unreadable: camera moved, blocked or too dark),
+`lost the chain map: re-locking`, and `POPULATION` (more than 15 % of godets
+confirmed: check lighting or view before trusting alerts).
+
 ## Current integration boundary
 
-CAM-1 is the only enabled dense lane. Tier-1 responses are measurements and are
+CAM-1 and CAM-4 are the enabled dense lanes (each with its own sequence
+numbers; a sequence that restarts at 1, as it does at every window start, is
+accepted as a new stream). Tier-1 responses are measurements and are
 never rendered as alerts. Tier-2 state events are polled and upserted by the
-stable key `DAMAGE:<godet_id>:<loop>`, so retries and pending-to-confirmed
-updates do not create duplicate operator alerts.
+stable key `DAMAGE:<godet_id>:<loop>` (CAM-4: `CAM-4:DAMAGE:<godet_id>:<loop>`),
+so retries and pending-to-confirmed updates do not create duplicate operator
+alerts. After a pipeline restart, an event already stored in the same state is
+skipped, so its original evidence is kept.
 
 Candidate frame IDs are returned by the model and matched against the
-pipeline's sparse candidate-frame cache. If a candidate has aged out, the
-generated alert records the actual fallback frame used.
+pipeline's sparse candidate-frame cache. CAM-1 fills the cache from Tier-1
+detections; CAM-4 finds a fault spot about 10 s after its frame, so the model
+hands that frame back in a Tier-1 response (`retained_frames`) and the pipeline
+caches it. If a candidate has aged out, the alert uses the live frame and its
+measurements say `"evidence": "latest_frame"`.

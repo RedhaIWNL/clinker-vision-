@@ -6,6 +6,11 @@ alerts, local evidence storage, and a localhost-only REST alert viewer.
 Tier-2 responses include replayable damage events with stable deduplication keys;
 the pipeline correlates their candidate frame IDs with a sparse evidence cache.
 
+Two cameras are supported, each with its own operating window: CAM-1 (godet
+lips, night) and CAM-4 (side-plate overlap fault, day). **Step-by-step run instructions: [RUN-CAM4.md](RUN-CAM4.md).** See the CAM-4 section of
+[Docs/deployment.md](Docs/deployment.md) and
+[godet-damage-detector-model/docs/cam4.md](godet-damage-detector-model/docs/cam4.md).
+
 ## Local checks
 
 Install Go and Docker Compose, then run:

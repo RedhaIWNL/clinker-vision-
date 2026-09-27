@@ -5,7 +5,8 @@ gRPC model service for clinker godet vision — contract v0.3, proto package
 
 **Status: integrated real detector**. The service supports dense Tier-1
 measurements, persistent Tier-2 godet state, replayable damage events, restart
-snapshots, and the canned mock responder.
+snapshots, and the canned mock responder. CAM-4 (day side plates) runs as a second
+pipeline when started with `--cam4-bundle-dir model/cam4`: see [docs/cam4.md](docs/cam4.md).
 
 ## Quickstart
 
@@ -98,5 +99,7 @@ same TBD license as the service code.
 ## Layout
 
 `contract/` proto source · `src/` server + mock + pipeline/identity/alerts/bundle/store ·
-`src/gen/` generated stubs (never hand-edit) · `model/` calibration bundle (Phase 4) ·
+`src/cam4/` CAM-4 pipeline (odometer, unrolled chain, detector, identity, engine) ·
+`src/gen/` generated stubs (never hand-edit) · `model/` calibration bundle (Phase 4),
+`model/cam4/` CAM-4 bundle · `tools/cam4_replay.py` full-hour CAM-4 replay ·
 `tests/` gates · `examples/` artifacts · `docs/` sign-offs + runbook + compatibility statement.
