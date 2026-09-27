@@ -260,3 +260,61 @@ def test_real_frames_odometer_matches_batch():
     assert float(np.median(quals[1:])) > 0.5
     assert eng.stream.chain_status() == 0                # moving
     assert len(eng.ring) <= 900
+
+
+# ---- a second side-plate camera (CAM-3, the mirror of CAM-4) -------------------------------
+def relabelled_bundle(tmp_path, camera_id):
+    """The CAM-4 bundle relabelled as another camera, with valid checksums (a stand-in until the
+    real CAM-3 bundle exists: this tests routing, not CAM-3 accuracy)."""
+    import hashlib
+    d = tmp_path / camera_id.lower()
+    shutil.copytree(BUNDLE, d)
+    cal = d / "calibration.json"
+    cal.write_bytes(cal.read_bytes().replace(b'"camera_id": "CAM-4"', f'"camera_id": "{camera_id}"'.encode()))
+    lines = [f"{hashlib.sha256((d / n).read_bytes()).hexdigest()}  {n}" for n in ("calibration.json", "chainmap.npy")]
+    (d / "CHECKSUMS.sha256").write_text("\n".join(lines) + "\n")
+    return d
+
+
+def test_engine_takes_its_camera_from_the_bundle(tmp_path):
+    eng = Cam4Engine(relabelled_bundle(tmp_path, "CAM-3"), Store(tmp_path / "s.db"))
+    assert eng.camera_id == "CAM-3" and eng.state_key == "sideplate_state_CAM-3"
+    assert Cam4Engine(BUNDLE).state_key == "cam4_state"          # CAM-4 keeps its stored history
+
+
+def test_cam3_and_cam4_run_side_by_side(tmp_path):
+    srv = create_server("127.0.0.1:0", 8_000_000, str(ROOT / "model"), False, str(tmp_path / "store.db"),
+                        cam4_bundle_dir=str(BUNDLE),
+                        sideplate_bundle_dirs=[str(relabelled_bundle(tmp_path, "CAM-3"))])
+    port = srv.add_insecure_port("127.0.0.1:0")
+    srv.start()
+    ch = grpc.insecure_channel(f"127.0.0.1:{port}")
+    try:
+        stub = pb2_grpc.InferenceServiceStub(ch)
+        frame = grey_frame()
+        reqs = []
+        for i in range(10):
+            reqs.append(pb2.InferenceRequest(frame_id=f"c4-{i}", camera_id="CAM-4", image_data=frame, sequence_no=i + 1))
+            reqs.append(pb2.InferenceRequest(frame_id=f"c3-{i}", camera_id="CAM-3", image_data=frame, sequence_no=500 + i))
+        resps = {r.frame_id: r for r in stub.Infer(iter(reqs))}
+        assert len(resps) == 20 and "chain_pos" in resps["c3-3"].scalar_measurements
+        assert srv.servicer.sideplate["CAM-3"].counters["frames_total"] == 10
+        assert srv.servicer.sideplate["CAM-4"].counters["frames_total"] == 10
+        assert stub.GetGodetState(pb2.GodetStateRequest(camera_id="CAM-3")).camera_id == "CAM-3"
+        assert stub.GetGodetState(pb2.GodetStateRequest(camera_id="CAM-4")).camera_id == "CAM-4"
+    finally:
+        ch.close()
+        srv.stop(None)
+
+
+def test_cam3_event_keys_carry_the_camera(tmp_path):
+    eng = Cam4Engine(relabelled_bundle(tmp_path, "CAM-3"))
+    eng.hist = confirmed_engine().hist                            # a history with godet 1210 confirmed
+    keys = {e.event_key for e in eng.godet_state(pb2.GodetStateRequest(), pb2).events}
+    assert "CAM-3:DAMAGE:1210:2" in keys
+
+
+def test_two_bundles_for_one_camera_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="two bundles"):
+        create_server("127.0.0.1:0", 8_000_000, str(ROOT / "model"), False, str(tmp_path / "s.db"),
+                      cam4_bundle_dir=str(BUNDLE), sideplate_bundle_dirs=[str(BUNDLE)])

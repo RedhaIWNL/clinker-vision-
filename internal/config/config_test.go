@@ -296,3 +296,17 @@ func TestLoadCameraScheduleFromYAML(t *testing.T) {
 		t.Fatal("CAM-1 has no schedule of its own")
 	}
 }
+
+func TestValidateAcceptsCAM3ButNotCAM2(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cameras[2].Enabled = true
+	cfg.Cameras[2].NVRRTSPURL = "rtsp://nvr.example.local:554/cam/realmonitor?channel=3&subtype=0"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("CAM-3 should be accepted: %v", err)
+	}
+	cfg.Cameras[1].Enabled = true
+	cfg.Cameras[1].NVRRTSPURL = "rtsp://nvr.example.local:554/cam/realmonitor?channel=2&subtype=0"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("CAM-2 must still be rejected")
+	}
+}

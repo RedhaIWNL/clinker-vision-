@@ -226,6 +226,9 @@ func TestValidateResponseForCameraCAM4(t *testing.T) {
 	if _, err := ValidateResponseForCamera("f", "CAM-4", ok); err != nil {
 		t.Fatalf("valid CAM-4 response rejected: %v", err)
 	}
+	if _, err := ValidateResponseForCamera("f", "CAM-3", ok); err != nil {
+		t.Fatalf("CAM-3 uses the side-plate rules: %v", err)
+	}
 	if _, err := ValidateResponseForCamera("f", "CAM-1", ok); err == nil {
 		t.Fatal("CAM-1 rules must still require peak/dx/dy/slot")
 	}

@@ -34,9 +34,9 @@ const (
 
 var requiredCameraIDs = []string{"CAM-1", "CAM-2", "CAM-3", "CAM-4", "CAM-5", "CAM-6"}
 
-// Cameras the model service can analyse: CAM-1 (night godet lips) and CAM-4 (day side
-// plates). Every other camera must stay disabled.
-var supportedCameraIDs = map[string]bool{"CAM-1": true, "CAM-4": true}
+// Cameras the model service can analyse: CAM-1 (night godet lips), CAM-4 (day side plates)
+// and CAM-3 (its mirror; needs a CAM-3 bundle in the model). Others must stay disabled.
+var supportedCameraIDs = map[string]bool{"CAM-1": true, "CAM-3": true, "CAM-4": true}
 
 type Config struct {
 	Server    ServerConfig    `yaml:"server"`
@@ -341,7 +341,7 @@ func validateCameras(cameras []CameraConfig) error {
 		}
 		if camera.Enabled {
 			if !supportedCameraIDs[camera.ID] {
-				return fmt.Errorf("camera %s must be disabled: the model supports only CAM-1 and CAM-4", camera.ID)
+				return fmt.Errorf("camera %s must be disabled: the model supports only CAM-1, CAM-3 and CAM-4", camera.ID)
 			}
 			if err := validateRTSPURL(camera.NVRRTSPURL); err != nil {
 				return fmt.Errorf("camera %s: %w", camera.ID, err)

@@ -121,7 +121,7 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	for key, value := range event.GetMeasurements() {
 		measurementValues[key] = value
 	}
-	if frame.CameraID == "CAM-4" {
+	if frame.CameraID == "CAM-3" || frame.CameraID == "CAM-4" { // side-plate cameras
 		measurementValues["severity"] = godet.GetSeverity()
 		measurementValues["passes_seen"] = godet.GetPassesSeen()
 	} else {

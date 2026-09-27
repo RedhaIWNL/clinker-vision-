@@ -375,6 +375,7 @@ func RequestFromFrame(frame ingest.Frame) (*inferencev2.InferenceRequest, error)
 // Tier-1 scalar keys every response of a camera must carry.
 var tier1RequiredScalars = map[string][]string{
 	"CAM-1": {"peak", "dx", "dy", "slot"},
+	"CAM-3": {"chain_step", "chain_pos", "match_quality", "chain_status"},
 	"CAM-4": {"chain_step", "chain_pos", "match_quality", "chain_status"},
 }
 

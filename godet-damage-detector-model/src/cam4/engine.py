@@ -1,7 +1,7 @@
-"""CAM-4 engine: its own sequencing lane, stream -> identity -> history, evidence frames,
+"""Side-plate engine (one per camera: CAM-4, CAM-3): its own sequencing lane, stream -> identity -> history, evidence frames,
 Tier-2 state/events and health.
 
-The server routes every CAM-4 request here (CAM-1 keeps its own lane and pipeline). Framework
+The server routes each side-plate camera's requests to its engine (CAM-1 keeps its own lane and pipeline). Framework
 light: the gRPC message classes are passed in (pb2), so the engine is testable without a server.
 
 Evidence frames. A fault spot is only known once the detector has scored its columns, about
@@ -29,7 +29,6 @@ from .stream import ROW0, Cam4Stream
 
 LOG = logging.getLogger("clinker-vision-model.cam4")
 
-CAMERA_ID = "CAM-4"
 REORDER_WINDOW = 64
 SNAP_EVERY_PASSES = 200
 EVIDENCE_HALF = 130          # evidence box half size (px) around the fault spot
@@ -49,6 +48,9 @@ OUTBOX_PER_RESPONSE = 2      # retained JPEGs attached per Tier-1 response (mess
 class Cam4Engine:
     def __init__(self, bundle_dir, store=None):
         self.b = load_cam4_bundle(bundle_dir)
+        self.camera_id = self.b.camera_id
+        # CAM-4 keeps its original store key so a running server keeps its history.
+        self.state_key = "cam4_state" if self.camera_id == "CAM-4" else f"sideplate_state_{self.camera_id}"
         self.version = self.b.version
         self.n = int(self.b.ident["godets"])
         self.hist = Cam4History(self.b.rules, self.n)
@@ -70,15 +72,15 @@ class Cam4Engine:
         self.pass_alarm = float(self.b.rules["pass_alarm_relative"])
         self._build_front_end(None, None)
         if store is not None:
-            snap = store.load_kv("cam4_state")
+            snap = store.load_kv(self.state_key)
             if snap is not None and snap.get("version") == self.version:
                 self.hist.restore(snap["history"])
                 self._build_front_end(snap["stream"], snap["identity"])
-                LOG.info("CAM-4 state restored: %d godets with history", len(self.hist.g))
+                LOG.info("%s state restored: %d godets with history", self.camera_id, len(self.hist.g))
             elif snap is not None:
-                LOG.warning("CAM-4 stored state is for bundle %s, not %s: starting fresh history",
+                LOG.warning("%s stored state is for bundle %s, not %s: starting fresh history", self.camera_id,
                             snap.get("version"), self.version)
-        LOG.info("CAM-4 bundle loaded version=%s godets=%d", self.version, self.n)
+        LOG.info("%s bundle loaded version=%s godets=%d", self.camera_id, self.version, self.n)
 
     def _build_front_end(self, stream_snap, ident_snap):
         """(Re)build odometer + identity. History is kept; identity re-locks on the map."""
@@ -115,7 +117,7 @@ class Cam4Engine:
             n = missing_to - self.expected
             self.stream.on_gap(n)
             self._bump("sequence_gaps_total")
-            LOG.warning("CAM-4 sequence gap seq=%d..%d (%d frames)", self.expected, missing_to - 1, n)
+            LOG.warning("%s sequence gap seq=%d..%d (%d frames)", self.camera_id, self.expected, missing_to - 1, n)
             self.expected = missing_to
             while self.expected in self.hold:
                 release(self.hold.pop(self.expected)); self.expected += 1
@@ -123,7 +125,7 @@ class Cam4Engine:
     def _restart(self, seq):
         """The sender restarted (sequence_no fell back): the chain moved an unknown amount,
         so rebuild the odometer and re-lock identity. Godet history and loop count survive."""
-        LOG.warning("CAM-4 sequence restart: seq %d after expected %d -> re-locking on the chain map",
+        LOG.warning("%s sequence restart: seq %d after expected %d -> re-locking on the chain map", self.camera_id,
                     seq, self.expected)
         self._bump("sequence_restarts_total")
         with self.lock:
@@ -228,7 +230,7 @@ class Cam4Engine:
             self.hist.on_pass(rec, evidence)
             while self.hist.new_alerts:
                 a = self.hist.new_alerts.popleft()
-                LOG.warning("CAM-4 godet %d CONFIRMED overlap fault (severity %.2f, loop %d)",
+                LOG.warning("%s godet %d CONFIRMED overlap fault (severity %.2f, loop %d)", self.camera_id,
                             a["godet_id"], a["severity"], a["loop"])
                 if not self.hist.g[a["godet_id"]].get("evidence"):
                     self.counters["evidence_missing_total"] += 1
@@ -246,15 +248,15 @@ class Cam4Engine:
                 snap = {"version": self.version, "history": self.hist.snapshot(),
                         "identity": self.ident.snapshot(), "stream": self.stream.snapshot(),
                         "saved_at": time.time()}
-            self.store.save_kv("cam4_state", snap)
+            self.store.save_kv(self.state_key, snap)
         except Exception as e:                                   # never take the stream down
-            LOG.error("CAM-4 snapshot failed: %s", e)
+            LOG.error("%s snapshot failed: %s", self.camera_id, e)
 
     # ---- Tier 2 ---------------------------------------------------------------------------------
     def godet_state(self, request, pb2):
         r = pb2.GodetStateResponse()
         r.model_version = self.version
-        r.camera_id = CAMERA_ID
+        r.camera_id = self.camera_id
         with self.lock:
             G = {k: {"rel": list(v["rel"]), "loops": list(v["loops"]), "state": v["state"],
                      "evidence": v["evidence"], "confirmed_loop": v.get("confirmed_loop")}
@@ -267,7 +269,7 @@ class Cam4Engine:
             if requested and g not in requested:
                 continue
             ev = r.events.add()
-            ev.event_key = f"{CAMERA_ID}:DAMAGE:{g}:{v['confirmed_loop']}"
+            ev.event_key = f"{self.camera_id}:DAMAGE:{g}:{v['confirmed_loop']}"
             ev.kind = "damage"
             ev.godet_id = g
             ev.loop_no = int(v["confirmed_loop"])

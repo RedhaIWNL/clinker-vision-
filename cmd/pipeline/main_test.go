@@ -72,3 +72,10 @@ func TestReadinessCountsOnlyCamerasInsideTheirWindow(t *testing.T) {
 		t.Fatal("a camera in its window that is not ready makes the system not ready")
 	}
 }
+
+func TestWindowReportPathsCAM3(t *testing.T) {
+	_, rep := windowReportPaths("/srv/clinker-vision/data/alerts.db", "CAM-3", time.Date(2026, 9, 28, 9, 0, 0, 0, time.UTC))
+	if rep != filepath.Join("/srv/clinker-vision/data", "reports", "CAM-3-day-2026-09-28.md") {
+		t.Fatalf("CAM-3 report = %q", rep)
+	}
+}

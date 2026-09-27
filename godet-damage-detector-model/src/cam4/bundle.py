@@ -1,4 +1,4 @@
-"""CAM-4 calibration bundle: load, verify checksums, model_version."""
+"""Side-plate calibration bundle (CAM-4, CAM-3): load, verify checksums, model_version."""
 from __future__ import annotations
 
 import hashlib
@@ -32,6 +32,7 @@ class Cam4Bundle:
     rules: dict
     chainmap: np.ndarray     # 2 x loop_cols float32, unit-std fingerprint of one loop
     thresholds_id: str
+    camera_id: str           # CAM-4 | CAM-3 (from calibration.json)
     version: str             # <chainmap-sha8>+<build>+<thresholds-id>
 
 
@@ -39,7 +40,7 @@ def load_cam4_bundle(d) -> Cam4Bundle:
     d = Path(d)
     for f in ("calibration.json", "chainmap.npy", "CHECKSUMS.sha256"):
         if not (d / f).exists():
-            raise BundleError(f"CAM-4 bundle {d} missing {f}: refuse to serve")
+            raise BundleError(f"side-plate bundle {d} missing {f}: refuse to serve")
     want = {}
     for line in (d / "CHECKSUMS.sha256").read_text().splitlines():
         h, _, name = line.partition("  ")
@@ -48,16 +49,16 @@ def load_cam4_bundle(d) -> Cam4Bundle:
     for name in ("calibration.json", "chainmap.npy"):
         p = d / name
         if want.get(name) != hashlib.sha256(p.read_bytes()).hexdigest():
-            raise BundleError(f"CAM-4 bundle checksum mismatch on {name}: refuse to serve")
+            raise BundleError(f"side-plate bundle checksum mismatch on {name}: refuse to serve")
     cal = json.loads((d / "calibration.json").read_text())
     if cal.get("bundle_format") != BUNDLE_FORMAT:
-        raise BundleError(f"CAM-4 bundle format {cal.get('bundle_format')!r}, expected {BUNDLE_FORMAT!r}")
+        raise BundleError(f"side-plate bundle format {cal.get('bundle_format')!r}, expected {BUNDLE_FORMAT!r}")
     chain = np.load(d / "chainmap.npy").astype(np.float32)
     idn = cal["identity"]
     if chain.shape != (2, idn["loop_cols"]):
         raise BundleError(f"CAM-4 chain map shape {chain.shape} != (2, {idn['loop_cols']})")
     if abs(idn["loop_cols"] / idn["godets"] - idn["pitch"]) > 1e-3:
-        raise BundleError("CAM-4 bundle loop_cols / godets != pitch")
+        raise BundleError("side-plate bundle loop_cols / godets != pitch")
     g = cal["geometry"]
     ang = math.radians(g["travel_deg"])
     u = np.array([math.cos(ang), math.sin(ang)])
@@ -69,5 +70,5 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         slit_half=int(g["slit_half"]), pad=int(g["mosaic_pad"]),
         odo_a=tuple(g["odo_a"]), odo_b=tuple(g["odo_b"]), slit_a=tuple(g["slit_a"]),
         baselines=tuple(g["baselines"]), det=cal["detector"], ident=idn, rules=cal["rules"],
-        chainmap=chain, thresholds_id=cal["thresholds_id"],
+        chainmap=chain, thresholds_id=cal["thresholds_id"], camera_id=cal.get("camera_id", "CAM-4"),
         version=f"{sha8}+{build}+{cal['thresholds_id']}")
