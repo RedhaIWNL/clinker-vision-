@@ -34,6 +34,7 @@ class Cam4Bundle:
     thresholds_id: str
     camera_id: str           # CAM-4 | CAM-3 (from calibration.json)
     version: str             # <chainmap-sha8>+<build>+<thresholds-id>
+    wheels: dict | None = None   # wheel (galet) detector settings; None = no wheel tracking
 
 
 def load_cam4_bundle(d) -> Cam4Bundle:
@@ -70,5 +71,5 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         slit_half=int(g["slit_half"]), pad=int(g["mosaic_pad"]),
         odo_a=tuple(g["odo_a"]), odo_b=tuple(g["odo_b"]), slit_a=tuple(g["slit_a"]),
         baselines=tuple(g["baselines"]), det=cal["detector"], ident=idn, rules=cal["rules"],
-        chainmap=chain, thresholds_id=cal["thresholds_id"], camera_id=cal.get("camera_id", "CAM-4"),
+        chainmap=chain, thresholds_id=cal["thresholds_id"], camera_id=cal.get("camera_id", "CAM-4"), wheels=cal.get("wheels"),
         version=f"{sha8}+{build}+{cal['thresholds_id']}")

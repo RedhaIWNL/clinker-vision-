@@ -21,7 +21,13 @@ import cv2
 import numpy as np
 from scipy.ndimage import median_filter, uniform_filter1d
 
-ROW0, ROW1 = 40, 280          # mosaic rows kept (detector rows 40..280, texture rows 60..280)
+# Wheel (galet) signals, as the calibration repo's cam4/wheels.py (mosaic rows are absolute).
+WHEEL_DEFAULTS = {"stripe_rows": [326, 329], "stripe_above": [320, 323], "stripe_below": [332, 335],
+                  "hidden_frac": 0.7, "min_quality": 0.3, "min_step": 4.0, "min_contrast_frac": 0.5,
+                  "max_hidden_frac": 0.6, "hidden_window": 801, "strip_rows": [140, 340]}
+
+ROW0, ROW1 = 40, 340          # mosaic rows kept: damage detector 40..280, wheels (rail) down to 340
+DET_H = 280 - ROW0            # the damage detector sees exactly mosaic rows 40..280 (as calibrated)
 RING = 4096                   # accumulation ring (columns); the slit writes ~20 columns ahead
 FINAL_MARGIN = 20             # a column is final once the slit is this far past it
 CTX = 1100                    # detector context each side (median filters over 5 pitches)
@@ -87,7 +93,8 @@ def scores(top, wedge, det):
 class Cam4Stream:
     """One instance per CAM-4 dense stream. Call on_gray/on_frame in sequence order and
     on_gap(n) for frames that never arrived. Column batches go to subscribers:
-    fn(cols, fp_raw (2 x n), severity (n), top (n), missing (n bool))."""
+    fn(cols, fp_raw (2 x n), severity (n), top (n), missing (n bool)); and to wheel subscribers:
+    fn(cols, hidden (n bool: rail stripe hidden), readable (n bool), strip (rows x n uint8))."""
 
     def __init__(self, bundle):
         self.b = bundle
@@ -101,6 +108,8 @@ class Cam4Stream:
         H = ROW1 - ROW0
         self.acc = np.zeros((H, RING), np.float32)
         self.cnt = np.zeros(RING, np.float32)
+        self.bad = np.zeros(RING, bool)           # written by a frame with a poor match / crawling chain
+        self.wh = dict(WHEEL_DEFAULTS, **(getattr(bundle, "wheels", None) or {}))
         self.idx = 0                   # stream frame index (gaps advance it)
         self.s = None                  # chain position of the current frame
         self.hist = {}                 # idx -> (patch, s) for the last max(baselines) frames
@@ -111,13 +120,18 @@ class Cam4Stream:
         self.fin = np.zeros((H, 0), np.float32)   # finalised columns [fin0, next_final)
         self.fin0 = 0
         self.fin_missing = np.zeros(0, bool)
+        self.fin_bad = np.zeros(0, bool)
         self.done = CTX                # next column to score
         self.sinks = []
+        self.wheel_sinks = []
         self.counters = {"frames_total": 0, "columns_total": 0, "stopped_frames_total": 0,
                          "weak_frames_total": 0, "gap_frames_total": 0}
 
     def subscribe(self, fn):
         self.sinks.append(fn)
+
+    def subscribe_wheels(self, fn):
+        self.wheel_sinks.append(fn)
 
     # ---- per frame -------------------------------------------------------------------
     def on_frame(self, jpeg: bytes, frame_id=None, sequence_no=None):
@@ -160,7 +174,8 @@ class Cam4Stream:
             self.counters["stopped_frames_total"] += 1
         if qual < 0.2 and i > 0:
             self.counters["weak_frames_total"] += 1
-        self._paste(g, s_new)
+        bad = (qual < self.wh["min_quality"]) or (step < self.wh["min_step"])
+        self._paste(g, s_new, bad)
         self.idx += 1
         return {"frame_id": frame_id, "chain_step": step, "chain_pos": s_new,
                 "match_quality": qual, "chain_status": self.chain_status()}
@@ -183,7 +198,7 @@ class Cam4Stream:
         return 0
 
     # ---- unrolled chain ---------------------------------------------------------------
-    def _paste(self, g, s):
+    def _paste(self, g, s, bad=False):
         lines = cv2.remap(g, self.sx, self.sy, cv2.INTER_LINEAR).astype(np.float32)
         cols = np.round(s - self.A).astype(int) + self.b.pad
         lo = int(cols.min())
@@ -194,6 +209,7 @@ class Cam4Stream:
             j = c % RING
             self.acc[:, j] += lines[:, k] * self.wts[k]
             self.cnt[j] += self.wts[k]
+            self.bad[j] |= bad
 
     def _finalise(self, upto):
         if upto <= self.next_final:
@@ -203,9 +219,11 @@ class Cam4Stream:
         cnt = self.cnt[idx]
         cols = self.acc[:, idx] / np.maximum(cnt, 1e-6)[None]
         missing = cnt == 0
-        self.acc[:, idx] = 0; self.cnt[idx] = 0
+        bad = self.bad[idx].copy()
+        self.acc[:, idx] = 0; self.cnt[idx] = 0; self.bad[idx] = False
         self.fin = np.concatenate([self.fin, cols], 1)
         self.fin_missing = np.concatenate([self.fin_missing, missing])
+        self.fin_bad = np.concatenate([self.fin_bad, bad])
         self.counters["columns_total"] += upto - self.next_final
         self.next_final = upto
         self._score_blocks()
@@ -215,7 +233,7 @@ class Cam4Stream:
             a = self.done - CTX                              # window start (absolute column)
             end = self.next_final
             win = self.fin[:, a - self.fin0:end - self.fin0]
-            top, wedge, texture = column_signals(win, self.b.det)
+            top, wedge, texture = column_signals(win[:DET_H], self.b.det)
             sev = scores(top, wedge, self.b.det)
             fp = np.stack([top, texture]).astype(np.float32)
             fp = fp - cv2.blur(fp, (301, 1))
@@ -225,12 +243,34 @@ class Cam4Stream:
             cols = np.arange(self.done, e)
             for fn in self.sinks:
                 fn(cols, fp[:, sl], sev[sl], top[sl], miss)
+            if self.wheel_sinks:
+                bad = self.fin_bad[a - self.fin0:end - self.fin0]
+                hidden, readable, strip = self._wheel_signals(win, bad, self.fin_missing[a - self.fin0:end - self.fin0])
+                for fn in self.wheel_sinks:
+                    fn(cols, hidden[sl], readable[sl], strip[:, sl])
             self.done = e
             keep_from = self.done - CTX                      # trim what no window needs again
             if keep_from > self.fin0:
                 self.fin = self.fin[:, keep_from - self.fin0:]
                 self.fin_missing = self.fin_missing[keep_from - self.fin0:]
+                self.fin_bad = self.fin_bad[keep_from - self.fin0:]
                 self.fin0 = keep_from
+
+    def _wheel_signals(self, win, bad, missing):
+        """Rail stripe hidden / readable per column over a scoring window (grey only)."""
+        w = self.wh
+        r = lambda rr: win[rr[0] - ROW0:rr[1] - ROW0].mean(0)
+        stripe = r(w["stripe_rows"]) - 0.5 * (r(w["stripe_above"]) + r(w["stripe_below"]))
+        visible = median_filter(stripe, 2001)
+        hidden = uniform_filter1d((stripe < w["hidden_frac"] * np.maximum(visible, 1.0)).astype(np.float32), 9) > 0.5
+        clean = uniform_filter1d((~bad).astype(np.float32), 41) > 0.9
+        self.stripe_level = 0.98 * getattr(self, "stripe_level", float(np.median(visible))) + 0.02 * float(np.median(visible))
+        dusty = (visible < w["min_contrast_frac"] * self.stripe_level) | (
+            uniform_filter1d(hidden.astype(np.float32), w["hidden_window"]) > w["max_hidden_frac"])
+        readable = clean & ~missing & ~dusty
+        s0, s1 = w["strip_rows"]
+        strip = np.clip(win[s0 - ROW0:s1 - ROW0], 0, 255).astype(np.uint8)
+        return hidden, readable, strip
 
     # ---- persistence (odometer/mosaic are not persisted: they rebuild in seconds) -------
     def snapshot(self):

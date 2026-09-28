@@ -26,6 +26,7 @@ import numpy as np
 from .bundle import load_cam4_bundle
 from .identity import Cam4History, Cam4Identity
 from .stream import ROW0, Cam4Stream
+from .wheels import WheelTracker
 
 LOG = logging.getLogger("clinker-vision-model.cam4")
 
@@ -70,12 +71,15 @@ class Cam4Engine:
         self.outbox = deque()               # frame records (with JPEG) to hand back
         self.block_peaks = deque(maxlen=2 * self.n)
         self.pass_alarm = float(self.b.rules["pass_alarm_relative"])
+        self.wheels = WheelTracker(self.b, None, self.camera_id, self._queue_evidence) if self.b.wheels else None
         self._build_front_end(None, None)
         if store is not None:
             snap = store.load_kv(self.state_key)
             if snap is not None and snap.get("version") == self.version:
                 self.hist.restore(snap["history"])
                 self._build_front_end(snap["stream"], snap["identity"])
+                if self.wheels is not None:
+                    self.wheels.restore(snap.get("wheels"))
                 LOG.info("%s state restored: %d godets with history", self.camera_id, len(self.hist.g))
             elif snap is not None:
                 LOG.warning("%s stored state is for bundle %s, not %s: starting fresh history", self.camera_id,
@@ -93,6 +97,9 @@ class Cam4Engine:
         self.stream.subscribe(self.ident.on_columns)
         self.stream.subscribe(self._on_columns)
         self.ident.subscribe(self._on_pass)
+        if self.wheels is not None:
+            self.wheels.ident = self.ident
+            self.stream.subscribe_wheels(self.wheels.on_wheels)
         self.ring.clear()
 
     # ---- sequencing lane (same policy as CAM-1: reorder window 64, gaps declared) -----
@@ -197,6 +204,12 @@ class Cam4Engine:
                 self.outbox.append(rec)
                 self.counters["retained_frames_total"] += 1
 
+    def _queue_evidence(self, rec):
+        """A picture made by the engine itself (wheel evidence) to hand back like a frame."""
+        with self.lock:
+            self.outbox.append(rec)
+            self.counters["retained_frames_total"] += 1
+
     def take_retained(self, n=OUTBOX_PER_RESPONSE):
         with self.lock:
             out = []
@@ -248,6 +261,8 @@ class Cam4Engine:
                 snap = {"version": self.version, "history": self.hist.snapshot(),
                         "identity": self.ident.snapshot(), "stream": self.stream.snapshot(),
                         "saved_at": time.time()}
+            if self.wheels is not None:
+                snap["wheels"] = self.wheels.snapshot()
             self.store.save_kv(self.state_key, snap)
         except Exception as e:                                   # never take the stream down
             LOG.error("%s snapshot failed: %s", self.camera_id, e)
@@ -285,6 +300,8 @@ class Cam4Engine:
                 ev.measurements["evidence_loop"] = float(e.get("loop", -1))
                 if e.get("captured_at"):
                     ev.occurred_at.seconds, ev.occurred_at.nanos = e["captured_at"]
+        if self.wheels is not None:
+            self.wheels.events(r, requested)
         wanted = sorted(requested) or sorted(
             g for g, v in G.items() if v["state"] in ("confirmed", "suspect"))
         for g in wanted:
@@ -340,5 +357,8 @@ class Cam4Engine:
         items["godets_confirmed"] = sum(v["state"] == "confirmed" for v in self.hist.g.values())
         items["godets_suspect"] = sum(v["state"] == "suspect" for v in self.hist.g.values())
         items["godets_seen"] = len(self.hist.g)
+        if self.wheels is not None:
+            items.update({f"wheel_{k}": v for k, v in self.wheels.counters.items()})
+            items.update({f"wheel_flags_{k}": v for k, v in self.wheels.active_counts().items()})
         for k, v in items.items():
             h.counters[k] = float(v)

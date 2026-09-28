@@ -62,6 +62,27 @@ chain map in about 1 minute.
 - `tools/cam4_replay.py`: full-hour replay through the engine with pipeline-identical JPEGs
   (`python tools/cam4_replay.py --out <dir> <video.mp4> ...`).
 
+## Wheels (galets)
+
+The engine also tracks the wheels under the chain (`src/cam4/wheels.py`, settings in the
+bundle's `wheels` block; method and evidence in the calibration repo's `WHEELS_PLAN.md`).
+- **Detection.** In the unrolled chain a wheel hides the rail's bright stripe (mosaic rows
+  326–329). Detection uses brightness, not colour, because at noon the stripe loses its blue.
+  Columns written during a poor match, a crawling chain or dust are unreadable, never "no wheel".
+- **Map.** Wheels are put on the godet map. Each chain loop is one pass.
+- **Rules**, after every pass within one identity lock:
+  - `wheel_gap`: 5 or more empty godets;
+  - `wheel_density`: 2 or more wheels in 3 godets;
+  - `wheel_missing`: a wheel of the earlier passes absent on the 2 latest.
+- **Keys.** Gap and density keys are stable (`CAM-4:WHEEL_GAP:<first godet>`), so each place is
+  raised once.
+- **Evidence.** A picture of the unrolled chain around the place, handed back in
+  `retained_frames`.
+- **Checks.**
+  - Offline, 10:00 + noon: 66 of 66 wheels found on 300 hand-checked godets, 0 false.
+  - Pass-to-pass agreement 97.7–100 %; about 300 wheels per loop.
+  - `tests/test_wheels.py` covers the rules on a synthetic chain.
+
 ## Limits
 
 - Calibrated on 2026-09-07 10:00 and 12:00 light only. The thresholds were chosen on those

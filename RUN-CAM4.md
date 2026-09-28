@@ -148,6 +148,28 @@ cat data/reports/CAM-4-day-$(date +%F).md
 
 CAM-1 keeps its `night-<date>.md` reports.
 
+## 8b. Wheel (galet) alerts
+
+CAM-4 also watches the wheels under the chain. There is normally one wheel every 4 godets. It
+raises three kinds of alert (camera CAM-4, target **galet**):
+
+| Alert | Meaning | When |
+|---|---|---|
+| `WHEEL_GAP` | 5 or more godets in a row without a wheel | once per place (it's how the chain is built) |
+| `WHEEL_DENSITY` | 2 or more wheels within 3 godets | once per place |
+| `WHEEL_MISSING` | a wheel that was there is gone on the last 2 passes | when it happens (a change: check the chain) |
+
+The godet number is the first godet of the place; the measurements give `first_godet`,
+`last_godet`, `godets` and `wheels`. The picture is the unrolled chain around the place, with
+godet numbers, wheels boxed and the flagged stretch framed.
+
+- The first wheel alerts appear after **2 chain loops** (about 35 minutes of moving chain).
+- On the 2026-09-07 recordings: about 14 gap places and 9–10 density places per loop, and no
+  missing wheel.
+- `WHEEL_GAP` and `WHEEL_DENSITY` are the fixed pattern of the chain. Mark them seen once
+  they're checked; they won't come back under the same key.
+- A **`WHEEL_MISSING` is the one to act on.**
+
 ## 9. If something goes wrong
 
 ```bash
