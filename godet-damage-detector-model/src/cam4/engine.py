@@ -25,7 +25,7 @@ import numpy as np
 
 from .bundle import load_cam4_bundle
 from .identity import Cam4History, Cam4Identity
-from .stream import ROW0, Cam4Stream
+from .stream import Cam4Stream
 from .wheels import WheelTracker
 
 LOG = logging.getLogger("clinker-vision-model.cam4")
@@ -229,7 +229,7 @@ class Cam4Engine:
         evidence = None
         if frame is not None:
             a = frame["s"] - (col - self.b.pad)              # along travel, in the frame
-            bb = rec.top_row + ROW0 + 25 - self.b.slit_half  # across the band (fault spot)
+            bb = rec.top_row + self.stream.row0 + 25 - self.b.slit_half  # across the band (fault spot)
             x, y = self.b.p0 + a * self.b.u + bb * self.b.v
             W, H = self.b.frame_size
             x0, y0 = max(0.0, x - EVIDENCE_HALF), max(0.0, y - EVIDENCE_HALF)
@@ -326,6 +326,8 @@ class Cam4Engine:
         lines = []
         if s.chain_status() == 2:
             lines.append("conveyor stopped")
+        if s.empty_share() > 0.5:
+            lines.append("conveyor empty: plates not judged")
         if not self.hist.ready():
             lines.append(f"history building: {len(self.hist.pop)} passes of 300 needed")
         view_lost = len(quals) >= 100 and float(np.median(quals)) < 0.25

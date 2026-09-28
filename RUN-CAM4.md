@@ -83,6 +83,28 @@ sudo chown 65532:65532 config/config.yaml
 sudo chmod 600 config/config.yaml
 ```
 
+## 4b. Turn CAM-3 on (the other side of the chain)
+
+CAM-3 uses the same engine with its own bundle (`model/cam3`, already loaded by
+docker-compose). In `config/config.yaml`, replace the `CAM-3` block with:
+
+```yaml
+  - id: "CAM-3"
+    enabled: true
+    nvr_rtsp_url: "rtsp://admin:PASSWORD@192.168.1.200:554/cam/realmonitor?channel=3&subtype=0"
+    sample_interval_seconds: 1
+    queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "09:00"
+      stop: "16:00"
+      timezone: "Africa/Casablanca"
+```
+
+Check it as for CAM-4 below, with `CAM-3` in the commands (`CAM-3 bundle loaded ... godets=1210`).
+It locks onto its chain map about 1 minute after the chain moves. When the conveyor runs
+empty, its status says `conveyor empty: plates not judged` and no alert is raised there.
+
 ## 5. Build and start
 
 ```bash

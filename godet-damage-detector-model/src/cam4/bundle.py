@@ -30,11 +30,12 @@ class Cam4Bundle:
     det: dict
     ident: dict
     rules: dict
-    chainmap: np.ndarray     # 2 x loop_cols float32, unit-std fingerprint of one loop
+    chainmap: np.ndarray     # channels x loop_cols float32, unit-std fingerprint of one loop (CAM-4: 2)
     thresholds_id: str
     camera_id: str           # CAM-4 | CAM-3 (from calibration.json)
     version: str             # <chainmap-sha8>+<build>+<thresholds-id>
     wheels: dict | None = None   # wheel (galet) detector settings; None = no wheel tracking
+    strip_rows: tuple | None = None  # mosaic rows the stream keeps; None = CAM-4's 40..340
 
 
 def load_cam4_bundle(d) -> Cam4Bundle:
@@ -56,14 +57,17 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         raise BundleError(f"side-plate bundle format {cal.get('bundle_format')!r}, expected {BUNDLE_FORMAT!r}")
     chain = np.load(d / "chainmap.npy").astype(np.float32)
     idn = cal["identity"]
-    if chain.shape != (2, idn["loop_cols"]):
-        raise BundleError(f"CAM-4 chain map shape {chain.shape} != (2, {idn['loop_cols']})")
+    n_ch = len(idn["fingerprint_std"])
+    if chain.shape != (n_ch, idn["loop_cols"]):
+        raise BundleError(f"side-plate chain map shape {chain.shape} != ({n_ch}, {idn['loop_cols']})")
     if abs(idn["loop_cols"] / idn["godets"] - idn["pitch"]) > 1e-3:
         raise BundleError("side-plate bundle loop_cols / godets != pitch")
     g = cal["geometry"]
     ang = math.radians(g["travel_deg"])
     u = np.array([math.cos(ang), math.sin(ang)])
     v = np.array([-u[1], u[0]]) if -u[1] > 0 else np.array([u[1], -u[0]])
+    if (v[0] > 0) != (g.get("rail_side", "+x") == "+x"):     # Camera 3 is CAM-4 mirrored: rail toward -x
+        v = -v
     sha8 = hashlib.sha256((d / "chainmap.npy").read_bytes()).hexdigest()[:8]
     build = os.environ.get("MODEL_BUILD", "dev")
     return Cam4Bundle(
@@ -72,4 +76,5 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         odo_a=tuple(g["odo_a"]), odo_b=tuple(g["odo_b"]), slit_a=tuple(g["slit_a"]),
         baselines=tuple(g["baselines"]), det=cal["detector"], ident=idn, rules=cal["rules"],
         chainmap=chain, thresholds_id=cal["thresholds_id"], camera_id=cal.get("camera_id", "CAM-4"), wheels=cal.get("wheels"),
+        strip_rows=tuple(cal["strip_rows"]) if "strip_rows" in cal else None,
         version=f"{sha8}+{build}+{cal['thresholds_id']}")

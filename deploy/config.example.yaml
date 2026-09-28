@@ -16,10 +16,19 @@ cameras:
     enabled: false
     sample_interval_seconds: 1
     queue_capacity: 64
+  # Day side plates, the OTHER side of the chain (the mirror of CAM-4). NVR channel 3, main stream
+  # (2688x1520). Calibrated on 2026-09-27 10:00-12:26 light only: widen the window only after
+  # checking the status card at the edges. An empty conveyor is reported and not judged.
   - id: "CAM-3"
     enabled: false
+    nvr_rtsp_url: "rtsp://admin:REDACTED@192.168.1.200:554/cam/realmonitor?channel=3&subtype=0"
     sample_interval_seconds: 1
     queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "09:00"
+      stop: "16:00"
+      timezone: "Africa/Casablanca"
   # Day side plates (overlap fault). NVR channel 4 = camera 192.168.1.144, main stream
   # (2688x1520; the model refuses any other size). Its own hours: the calibration was
   # checked on 10:00 and 12:00 light only, so widen the window only after checking the

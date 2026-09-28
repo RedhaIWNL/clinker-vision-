@@ -266,15 +266,22 @@ movement unreadable: camera moved, blocked or too dark),
 `lost the chain map: re-locking`, and `POPULATION` (more than 15 % of godets
 confirmed: check lighting or view before trusting alerts).
 
-### CAM-3 (prepared, not yet calibrated)
+### CAM-3 (day side plates, the other side of the chain)
 
-CAM-3 sees the other side of the same chain, mirrored. The pipeline accepts
-`CAM-3` (same frame rules, alerts `CAM-3:DAMAGE:<godet>:<loop>`, report
-`CAM-3-day-<date>.md`) and the model can run one side-plate engine per camera
-(`--sideplate-bundle-dir model/cam3`, repeatable). There is **no CAM-3 bundle
-yet**: it needs the full-hour footage and labels described in the calibration
-repo's `CAM3_DAY_PLAN.md`. Until then keep CAM-3 disabled; enabled without a
-bundle, its frames are dead-lettered and its status poll reports "not enabled".
+CAM-3 sees the other side of the same chain, mirrored. It runs the same side-plate
+engine from its own bundle (`--sideplate-bundle-dir model/cam3`, loaded by
+docker-compose) with its own settings, calibrated on the 2026-09-27 recording
+(calibration repo `CAM3_DAY_PLAN.md`, section 6):
+
+- the fault is judged by comparing each plate with its neighbours on a darkness map
+  (the CAM-4 top-edge detector does not fit this view);
+- godet numbers 1–1210 (godet 0 reported as 1210), alerts `CAM-3:DAMAGE:<godet>:<loop>`,
+  report `CAM-3-day-<date>.md`; the numbers are CAM-3's own chain map, not CAM-4's;
+- **empty conveyor:** bare godets are recognised and not judged; the status card says
+  `conveyor empty: plates not judged`;
+- a fault may be on one side of the chain only, so CAM-3 and CAM-4 alerts need not agree.
+
+It is disabled in the example config: turn it on as in `RUN-CAM4.md` section 4b.
 
 ## Current integration boundary
 

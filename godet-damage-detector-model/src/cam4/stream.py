@@ -12,6 +12,11 @@ Documented deviations from the batch pipeline (cam4/unroll.py + cam4/detect.py):
 2. Only mosaic rows 40..280 are built (all the detector reads).
 3. The Otsu brightness blocks are aligned to absolute column multiples of 400 (batch:
    relative to each 20000-column chunk). Replay gate: see tests/test_cam4.py.
+
+Camera 3 (bundle detector mode "neighbours", calibration repo cam4/neighbours.py): the damage
+score compares each plate with its neighbours on a darkness map, the fingerprint is the brightness
+of image bands, and an empty conveyor (bare godet floors repeating) is reported and not judged.
+Scores are computed every NB_STEP absolute columns and held, as in the batch tool.
 """
 from __future__ import annotations
 
@@ -26,8 +31,9 @@ WHEEL_DEFAULTS = {"stripe_rows": [326, 329], "stripe_above": [320, 323], "stripe
                   "hidden_frac": 0.7, "min_quality": 0.3, "min_step": 4.0, "min_contrast_frac": 0.5,
                   "max_hidden_frac": 0.6, "hidden_window": 801, "strip_rows": [140, 340]}
 
-ROW0, ROW1 = 40, 340          # mosaic rows kept: damage detector 40..280, wheels (rail) down to 340
+ROW0, ROW1 = 40, 340          # CAM-4 mosaic rows kept: damage detector 40..280, wheels (rail) down to 340
 DET_H = 280 - ROW0            # the damage detector sees exactly mosaic rows 40..280 (as calibrated)
+NB_STEP = 30                  # neighbour score every 30 absolute columns (batch: the same grid)
 RING = 4096                   # accumulation ring (columns); the slit writes ~20 columns ahead
 FINAL_MARGIN = 20             # a column is final once the slit is this far past it
 CTX = 1100                    # detector context each side (median filters over 5 pitches)
@@ -75,9 +81,62 @@ def column_signals(g, det):
     end = np.where(lit_after.any(0), lit_after.argmax(0), L)
     closed = (first_dark >= 2) & (end < L)
     wedge = np.where(closed, end - first_dark, 0).astype(np.float32)
-    t0 = det["texture_rows"][0] - ROW0
+    t0 = det["texture_rows"][0] - ROW0                         # CAM-4 only (rows from 40)
     texture = np.abs(cv2.Sobel(g[t0:], cv2.CV_32F, 1, 0)).mean(0)
     return top, wedge, texture
+
+
+def darkness(g):
+    """How much darker than the local plate surface (bright level over ~9 rows x 25 columns)."""
+    level = cv2.dilate(cv2.GaussianBlur(g, (5, 5), 0), np.ones((9, 25), np.uint8))
+    return np.clip(level - g, 0, None)
+
+
+def neighbour_scores(g, row0, xs, det):
+    """Plate-vs-neighbours score at window columns xs (g: grey window, first row = mosaic row0)."""
+    r0, r1 = det["rows"][0] - row0, det["rows"][1] - row0
+    hw, sx, sy, P = det["half"], det["shift_cols"], det["shift_rows"], det["pitch"]
+    g0 = g
+    if det.get("image") == "darkness":
+        g = g.copy(); g[r0 - 20:r1 + 20] = darkness(g[r0 - 20:r1 + 20])
+    out = np.full(len(xs), np.nan, np.float32)
+    for i, x in enumerate(xs):
+        if g0[r0:r1, x - hw:x + hw].std() < 1.0:
+            continue
+        tpl = g[r0:r1, x - hw:x + hw]
+        best = []
+        for k in (-2, -1, 1, 2):
+            xn = int(round(x + k * P))
+            if xn - hw - sx < 0 or xn + hw + sx > g.shape[1]:
+                continue
+            win = g[r0 - sy:r1 + sy, xn - hw - sx:xn + hw + sx]
+            if g0[r0 - sy:r1 + sy, xn - hw - sx:xn + hw + sx].std() < 1.0 or win.std() < 1e-3:
+                continue
+            best.append(float(cv2.matchTemplate(win, tpl, cv2.TM_CCOEFF_NORMED).max()))
+        if len(best) >= 3:
+            best.sort()
+            out[i] = 1.0 - (best[-2] if det.get("agg") == "second" else float(np.mean(best)))
+    return out
+
+
+def repeat_scores(g, row0, xs, det):
+    """How much the band above the plates repeats 1 and 2 godets on (bare godet floors = empty)."""
+    r0, r1 = det["load_rows"][0] - row0, det["load_rows"][1] - row0
+    hw, P = det["load_half"], det["pitch"]
+    out = np.full(len(xs), np.nan, np.float32)
+    for i, x in enumerate(xs):
+        tpl = g[r0:r1, x - hw:x + hw]
+        if tpl.std() < 1.0:
+            continue
+        v = []
+        for k in (1, 2):
+            xn = int(round(x + k * P))
+            win = g[max(0, r0 - 6):r1 + 6, xn - hw - 10:xn + hw + 10]
+            if win.shape[1] == 2 * hw + 20 and win.std() >= 1.0:
+                v.append(float(cv2.matchTemplate(win, tpl, cv2.TM_CCOEFF_NORMED).max()))
+        if v:
+            out[i] = float(np.mean(v))
+    return out
 
 
 def scores(top, wedge, det):
@@ -102,10 +161,12 @@ class Cam4Stream:
         self.ox, self.oy = _grid(bundle, np.arange(a0, a1), np.arange(b0, b1))
         self.win = cv2.createHanningWindow((self.ox.shape[1], self.ox.shape[0]), cv2.CV_32F)
         self.A = np.arange(*bundle.slit_a)
-        rows_b = np.arange(ROW0, ROW1) - bundle.slit_half
+        self.row0, self.row1 = tuple(getattr(bundle, "strip_rows", None) or (ROW0, ROW1))
+        self.mode = bundle.det.get("mode", "overlap")          # "overlap" (CAM-4) | "neighbours" (CAM-3)
+        rows_b = np.arange(self.row0, self.row1) - bundle.slit_half
         self.sx, self.sy = _grid(bundle, self.A, rows_b)       # (rows, len(A))
         self.wts = (1 - np.abs(self.A) / 7.0).astype(np.float32)
-        H = ROW1 - ROW0
+        H = self.row1 - self.row0
         self.acc = np.zeros((H, RING), np.float32)
         self.cnt = np.zeros(RING, np.float32)
         self.bad = np.zeros(RING, bool)           # written by a frame with a poor match / crawling chain
@@ -125,7 +186,8 @@ class Cam4Stream:
         self.sinks = []
         self.wheel_sinks = []
         self.counters = {"frames_total": 0, "columns_total": 0, "stopped_frames_total": 0,
-                         "weak_frames_total": 0, "gap_frames_total": 0}
+                         "weak_frames_total": 0, "gap_frames_total": 0, "empty_columns_total": 0}
+        self.empty_recent = deque(maxlen=20)       # share of empty columns in the latest scored blocks
 
     def subscribe(self, fn):
         self.sinks.append(fn)
@@ -233,16 +295,24 @@ class Cam4Stream:
             a = self.done - CTX                              # window start (absolute column)
             end = self.next_final
             win = self.fin[:, a - self.fin0:end - self.fin0]
-            top, wedge, texture = column_signals(win[:DET_H], self.b.det)
-            sev = scores(top, wedge, self.b.det)
-            fp = np.stack([top, texture]).astype(np.float32)
-            fp = fp - cv2.blur(fp, (301, 1))
             e = end - CTX                                    # emit [done, e)
             sl = slice(self.done - a, e - a)
             miss = self.fin_missing[self.done - self.fin0:e - self.fin0]
             cols = np.arange(self.done, e)
-            for fn in self.sinks:
-                fn(cols, fp[:, sl], sev[sl], top[sl], miss)
+            if self.mode == "neighbours":
+                fp, sev, top, empty = self._neighbour_block(win, a, cols)
+                self.counters["empty_columns_total"] += int(empty.sum())
+                self.empty_recent.append(float(empty.mean()))
+                miss = miss | empty                          # an empty conveyor is not judged
+                for fn in self.sinks:
+                    fn(cols, fp, sev, top, miss)
+            else:
+                top, wedge, texture = column_signals(win[:DET_H], self.b.det)
+                sev = scores(top, wedge, self.b.det)
+                fp = np.stack([top, texture]).astype(np.float32)
+                fp = fp - cv2.blur(fp, (301, 1))
+                for fn in self.sinks:
+                    fn(cols, fp[:, sl], sev[sl], top[sl], miss)
             if self.wheel_sinks:
                 bad = self.fin_bad[a - self.fin0:end - self.fin0]
                 hidden, readable, strip = self._wheel_signals(win, bad, self.fin_missing[a - self.fin0:end - self.fin0])
@@ -256,10 +326,33 @@ class Cam4Stream:
                 self.fin_bad = self.fin_bad[keep_from - self.fin0:]
                 self.fin0 = keep_from
 
+    def _neighbour_block(self, win, a, cols):
+        """Camera 3: fingerprint (image bands), neighbour score (held over NB_STEP), empty guard."""
+        det, idn = self.b.det, self.b.ident
+        fp = np.stack([win[r0 - self.row0:r1 - self.row0].mean(0) for r0, r1 in idn["fingerprint_bands"]])
+        fp = (fp - cv2.blur(fp, (301, 1))).astype(np.float32)[:, cols[0] - a:cols[-1] + 1 - a]
+        grid = NB_STEP * np.floor((cols + NB_STEP // 2) / NB_STEP).astype(int)   # batch: [c-15, c+15) -> c
+        gu, inv = np.unique(grid, return_inverse=True)
+        sev = neighbour_scores(win, self.row0, gu - a, det)[inv]
+        # empty: median over ~10 godets of the repetition of the band above the plates
+        step = 4 * NB_STEP
+        xs = np.arange(step * int(np.ceil((a + 300) / step)), a + win.shape[1] - 300, step)
+        rep = repeat_scores(win, self.row0, xs - a, det)
+        half = 5 * det["pitch"]
+        level = np.array([np.nanmedian(np.nan_to_num(rep[np.abs(xs - c) <= half], nan=0.0))
+                          if np.any(np.abs(xs - c) <= half) else 0.0 for c in cols])
+        empty = level >= det["max_repeat"]
+        top = np.full(len(cols), det["spot_row"] - 25 - self.row0, np.float32)
+        return fp, np.nan_to_num(sev, nan=0.0), top, empty
+
+    def empty_share(self):
+        """Share of the recently scored chain that was an empty conveyor (not judged)."""
+        return float(np.mean(self.empty_recent)) if self.empty_recent else 0.0
+
     def _wheel_signals(self, win, bad, missing):
         """Rail stripe hidden / readable per column over a scoring window (grey only)."""
         w = self.wh
-        r = lambda rr: win[rr[0] - ROW0:rr[1] - ROW0].mean(0)
+        r = lambda rr: win[rr[0] - self.row0:rr[1] - self.row0].mean(0)
         stripe = r(w["stripe_rows"]) - 0.5 * (r(w["stripe_above"]) + r(w["stripe_below"]))
         visible = median_filter(stripe, 2001)
         hidden = uniform_filter1d((stripe < w["hidden_frac"] * np.maximum(visible, 1.0)).astype(np.float32), 9) > 0.5
@@ -269,7 +362,7 @@ class Cam4Stream:
             uniform_filter1d(hidden.astype(np.float32), w["hidden_window"]) > w["max_hidden_frac"])
         readable = clean & ~missing & ~dusty
         s0, s1 = w["strip_rows"]
-        strip = np.clip(win[s0 - ROW0:s1 - ROW0], 0, 255).astype(np.uint8)
+        strip = np.clip(win[s0 - self.row0:s1 - self.row0], 0, 255).astype(np.uint8)
         return hidden, readable, strip
 
     # ---- persistence (odometer/mosaic are not persisted: they rebuild in seconds) -------

@@ -1,0 +1,135 @@
+{
+ "bundle_format": "cam4-1",
+ "camera_id": "CAM-3",
+ "lighting": "day",
+ "thresholds_id": "c3d-20260928",
+ "frame_size": [
+  2688,
+  1520
+ ],
+ "geometry": {
+  "p0": [
+   1430.0,
+   1080.0
+  ],
+  "travel_deg": 69.0,
+  "slit_half": 200,
+  "mosaic_pad": 20,
+  "odo_a": [
+   -160,
+   160
+  ],
+  "odo_b": [
+   -150,
+   50
+  ],
+  "slit_a": [
+   -6,
+   7
+  ],
+  "baselines": [
+   1,
+   2,
+   3,
+   4
+  ],
+  "rail_side": "-x"
+ },
+ "detector": {
+  "mode": "neighbours",
+  "spot_row": 235,
+  "rows": [
+   195,
+   275
+  ],
+  "half": 40,
+  "shift_cols": 12,
+  "shift_rows": 4,
+  "pitch": 114.32,
+  "load_rows": [
+   20,
+   170
+  ],
+  "load_half": 100,
+  "max_repeat": 0.35,
+  "image": "darkness",
+  "agg": "second"
+ },
+ "identity": {
+  "loop_cols": 138328,
+  "godets": 1210,
+  "pitch": 114.32066115702479,
+  "phase": 0.0,
+  "piece": 4000,
+  "step": 2500,
+  "min_match": 0.45,
+  "fingerprint_std": [
+   10.004185676574707,
+   10.693453788757324,
+   7.619260311126709,
+   13.52354621887207,
+   22.194591522216797
+  ],
+  "reference": {
+   "run": "s27",
+   "start_col": 52000
+  },
+  "fingerprint_bands": [
+   [
+    140,
+    180
+   ],
+   [
+    180,
+    220
+   ],
+   [
+    220,
+    260
+   ],
+   [
+    260,
+    300
+   ],
+   [
+    300,
+    340
+   ]
+  ],
+  "scales": [
+   0.94,
+   0.96,
+   0.98,
+   1.0,
+   1.02,
+   1.04,
+   1.06
+  ],
+  "scale_clip": [
+   0.93,
+   1.07
+  ]
+ },
+ "rules": {
+  "pass_alarm_relative": 1.2,
+  "godet_alarm_relative": 1.2,
+  "min_passes": 2,
+  "history_passes": 8,
+  "population_passes": 1210
+ },
+ "provenance": {
+  "labels": [
+   "labels/cam3/cam3_day_damage_labels_2026-09-28-14-50.json",
+   "labels/cam3/c3d_label_v2_grade1_severity_grades_2026-09-28-15-03.json",
+   "labels/cam3/c3d_review_v1_verdict_check_2026-09-28-16-36.json"
+  ],
+  "videos": [
+   "NVR_ch3_main_20260927095948_20260927122621.mp4"
+  ],
+  "plan": "CAM3_DAY_PLAN.md"
+ },
+ "strip_rows": [
+  20,
+  340
+ ]
+}
