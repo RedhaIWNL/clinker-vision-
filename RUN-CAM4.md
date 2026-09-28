@@ -9,6 +9,13 @@ the pipeline restarted, and kept warning "median frame peak < 0.5, camera moved?
 
 ---
 
+## 0. Camera 1 was re-aimed: turn its old lane off
+
+Camera 1 now looks at the chain end after the sprocket. The Camera 1 model in this system was
+calibrated on the old view, so it can't work on the new one. In `config/config.yaml`, set the
+CAM-1 block to `enabled: false` (keep its URL for later), then
+`docker compose up -d --force-recreate pipeline`. At least one camera (CAM-4) must stay enabled.
+
 ## 1. Get the new version
 
 ```bash
