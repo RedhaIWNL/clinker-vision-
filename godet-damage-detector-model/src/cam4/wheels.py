@@ -7,8 +7,8 @@ readable. A wheel is a hidden stretch at least `min_width` columns wide, fully r
 split by a bright hub are joined; two touching wheels are split by the typical width). Each wheel
 is put on the chain map through identity; each chain loop is one pass.
 
-After every completed pass, within the current identity lock (placements of different locks can
-differ locally by ~1 godet):
+After every completed pass once 3 passes of the current identity lock exist (placements of
+different locks can differ locally by ~1 godet; until then the earlier flags stand):
   reference = wheels seen on >= 2 passes (1 where only one pass could see the spot) and on at
               least half of the passes that could see them
   rule A    = 5 or more consecutive godets with no reference wheel         -> wheel_gap
@@ -32,15 +32,35 @@ import numpy as np
 DEFAULTS = {"min_width": 90, "join_gap": 40, "typical_width": 130}
 MATCH = 60                  # same wheel on another pass (within one lock: offsets ~7 columns)
 KEEP_PASSES = 8
+MIN_PASSES = 3              # 2026-09-07 replay: judged on 1 or 2 passes, one missed or doubled wheel raised
+                            # a flag that the next loop cleared (13 of 15 short-lived flags); offline: 3-4
 GAP_GODETS = 5
 DENSE_WINDOW, DENSE_MIN = 3, 2
 COVER_RES = 8               # coverage bitmap resolution (map columns per cell)
 CHUNK = 2000                # strip columns per stored evidence chunk
 CONTEXT_GODETS = 3
+REG_WINDOW = 6 * 161        # registration: local wheel pattern each side of a wheel (columns)
+REG_SHIFTS = np.arange(-320, 321, 4)
+REG_TOL = 40
+FLAG_TOL = 2                # a place found again within +-2 godets keeps its flag (and key)
+SCALE_TOL = 0.04            # a stretch between two anchors must map ~1:1; otherwise one of them is wrong
 
 
 def circ(d, L):
     return (d + L / 2) % L - L / 2
+
+
+def local_shift(base, other, x, L):
+    """Shift (columns) that best lines up `other`'s wheels with `base`'s around map position x
+    (calibration repo cam4/wheelmap.py). Live placements of two passes can differ locally."""
+    b = base[np.abs(circ(base - x, L)) <= REG_WINDOW]
+    o = other[np.abs(circ(other - x, L)) <= REG_WINDOW + 320]
+    if len(b) == 0 or len(o) == 0:
+        return 0.0
+    d = circ(o[None, :] - b[:, None], L)
+    score = np.array([(np.abs(d - s) <= REG_TOL).any(1).sum() for s in REG_SHIFTS])
+    ties = REG_SHIFTS[score == score.max()]
+    return float(ties[np.argmin(np.abs(ties))])        # prefer the smallest shift
 
 
 class WheelTracker:
@@ -53,6 +73,8 @@ class WheelTracker:
         self.evidence_sink = evidence_sink
         self.run = None                    # [start, end] of the open hidden run (absolute columns)
         self.run_ok = True
+        self.waiting = deque()             # wheel centre columns not yet bracketed by anchors
+        self.cover_wait = deque()          # readable columns (subsampled) not yet bracketed by anchors
         self.passes = OrderedDict()        # loop -> {"wheels": [(pos, col)], "cover": bool[L/COVER_RES]}
         self.lock_id = None
         self.evaluated = -1
@@ -60,7 +82,9 @@ class WheelTracker:
         self.flags_lock = threading.Lock()  # stream thread writes, Tier-2 polls read
         self.chunks = deque()              # (col0, jpeg, cols, pos)
         self._chunk = None
-        self.counters = {"wheels_total": 0, "wheel_passes_total": 0, "wheel_evaluations_total": 0}
+        self.counters = {"wheels_total": 0, "wheel_passes_total": 0, "wheel_evaluations_total": 0,
+                         "wheels_unplaced_total": 0}
+        self.trace = None                  # replay/diagnostics: set to a list to record every evaluation
 
     # ---- identity helpers ---------------------------------------------------------------------
     def _positions(self, cols):
@@ -75,6 +99,48 @@ class WheelTracker:
             if cs[-1] - cs[0] >= 15000:
                 scale = float(np.clip(np.polyfit(cs, ps, 1)[0], 0.98, 1.02))
         return p_last + (np.asarray(cols, float) - c_last) * scale
+
+    def _interpolated(self, cols):
+        """Map positions of columns between the two anchors around each (as the offline map does),
+        and whether that stretch is trustworthy. Only columns at or before the last anchor.
+        - Extrapolating past the last anchor was off by 50-100 columns over hundreds of godets after
+          a conveyor stop (2026-09-07 replay): the same wheel became two on different passes.
+        - A wrong anchor squeezes the stretch next to it (after the noon re-lock, ~16 godets of chain
+          landed on 2): a stretch whose map/strip ratio is off by more than SCALE_TOL is "not seen"."""
+        an = np.array(self.ident.anchors, float)
+        cols = np.asarray(cols, float)
+        if len(an) < 2:
+            return cols + (an[0, 1] - an[0, 0]), np.ones(len(cols), bool)
+        k = np.clip(np.searchsorted(an[:, 0], cols), 1, len(an) - 1)
+        c0, p0, c1, p1 = an[k - 1, 0], an[k - 1, 1], an[k, 0], an[k, 1]
+        scale = (p1 - p0) / np.maximum(c1 - c0, 1.0)
+        old = cols < an[0, 0]                          # older than every anchor kept: 1:1 from the first
+        scale[old] = 1.0
+        pos = np.where(old, an[0, 1] + (cols - an[0, 0]), p0 + (cols - c0) * scale)
+        return pos, np.abs(scale - 1.0) <= SCALE_TOL
+
+    def _place_waiting(self):
+        idn = self.ident
+        if not idn.locked or not idn.anchors:
+            return
+        last = idn.anchors[-1][0]
+        n = 0
+        while n < len(self.waiting) and self.waiting[n] <= last:
+            n += 1
+        if n:
+            cols = [self.waiting.popleft() for _ in range(n)]
+            pos, ok = self._interpolated(cols)
+            for c, p, good in zip(cols, pos, ok):
+                if not good:
+                    self.counters["wheels_unplaced_total"] += 1
+                    continue
+                self._pass(self._loop(p))["wheels"].append((float(p % self.L), int(c)))
+                self.counters["wheels_total"] += 1
+        while self.cover_wait and self.cover_wait[0][-1] <= last:
+            cols = self.cover_wait.popleft()
+            pos, ok = self._interpolated(cols)
+            for p in pos[ok]:
+                self._pass(self._loop(p))["cover"][int((p - self.phase) % self.L) // COVER_RES] = True
 
     def _loop(self, pos):
         idn = self.ident
@@ -94,14 +160,14 @@ class WheelTracker:
         if lock != self.lock_id:                       # new lock: placements may differ, start over
             self.lock_id = lock
             self.passes.clear(); self.evaluated = -1; self.chunks.clear(); self._chunk = None
+            self.waiting.clear(); self.cover_wait.clear()
         pos = self._positions(cols)
         self._store_strip(cols, strip, pos)
-        if pos is not None:                            # coverage of this pass
-            for lp in np.unique([self._loop(p) for p in pos[:: max(1, len(pos) // 64)]]):
-                self._pass(int(lp))
-            ok = readable
-            for p in pos[ok][::COVER_RES // 2]:
-                self._pass(self._loop(p))["cover"][int((p - self.phase) % self.L) // COVER_RES] = True
+        if pos is not None:                            # coverage of this pass, placed like the wheels
+            rc = np.asarray(cols)[readable][::COVER_RES // 2]
+            if len(rc):
+                self.cover_wait.append(rc)
+        self._place_waiting()                          # anchors may have moved on since the last batch
         # hidden runs, carried across batches
         for c, h, r in zip(cols.tolist(), hidden.tolist(), readable.tolist()):
             if h:
@@ -116,8 +182,8 @@ class WheelTracker:
                     self._close_run()
                 else:
                     self.run_ok &= r                   # the gap inside a joined wheel must be readable too
-        if pos is not None:
-            self._maybe_evaluate(self._loop(pos[-1]))
+        if pos is not None and self.ident.anchors:     # every wheel before the last anchor is placed
+            self._maybe_evaluate(self._loop(self.ident.anchors[-1][1]))
 
     def _close_run(self):
         run, ok, self.run = self.run, self.run_ok, None
@@ -130,12 +196,9 @@ class WheelTracker:
         n = max(1, int(round(w / self.cfg["typical_width"]))) if w > 1.6 * self.cfg["typical_width"] else 1
         for k in range(n):
             col = a + (2 * k + 1) * w // (2 * n)
-            pos = self._positions([col])
-            if pos is None:
-                continue
-            p = float(pos[0])
-            self._pass(self._loop(p))["wheels"].append((float(p % self.L), int(col)))
-            self.counters["wheels_total"] += 1
+            if self.ident.locked:
+                self.waiting.append(col)               # placed once an anchor passes it
+        self._place_waiting()
 
     def _pass(self, lp):
         lp = int(lp)                                   # plain int: the state is saved as JSON
@@ -217,13 +280,27 @@ class WheelTracker:
         self.evaluated = max(done)
         self.counters["wheel_passes_total"] += 1
         passes = [self.passes[lp] for lp in sorted(done)][-KEEP_PASSES:]
-        if len(passes) < 2 and not all(p["cover"].mean() > 0.95 for p in passes):
-            return                                     # need 2 passes, or one full pass, first
+        if len(passes) < MIN_PASSES:
+            return                                     # flags neither raised nor cleared until then
         self.counters["wheel_evaluations_total"] += 1
         self._evaluate(passes, self.evaluated)
 
     def _seen(self, p, x):
         return bool(p["cover"][int(x) // COVER_RES])
+
+    def _registered(self, passes):
+        """Copies of the passes with wheels expressed in the most readable pass's coordinates."""
+        L = self.L
+        base = max(passes, key=lambda p: p["cover"].mean())
+        bx = np.array([w[0] for w in base["wheels"]], float)
+        out = []
+        for p in passes:
+            if p is base or not p["wheels"]:
+                out.append(p); continue
+            x = np.array([w[0] for w in p["wheels"]], float)
+            sh = np.array([local_shift(bx, x, v, L) for v in x])
+            out.append({"cover": p["cover"], "wheels": [(float((v - d) % L), w[1]) for v, d, w in zip(x, sh, p["wheels"])]})
+        return out
 
     def _reference(self, passes):
         L = self.L
@@ -250,6 +327,7 @@ class WheelTracker:
 
     def _evaluate(self, passes, loop):
         L = self.L
+        passes = self._registered(passes)
         ref = self._reference(passes)
         if not ref:
             return
@@ -296,6 +374,12 @@ class WheelTracker:
                 if len(late) == 2 and not any(any(abs(circ(w[0] - x, L)) <= MATCH for w in p["wheels"]) for p in late):
                     g = self.godet(x)
                     found.append(("wheel_missing", g, g, {"godets": 1, "wheels": 0}))
+        if self.trace is not None:
+            self.trace.append({"loop": int(loop), "lock": self.lock_id,
+                               "passes": [[len(p["wheels"]), round(float(p["cover"].mean()), 3)] for p in passes],
+                               "covered_godets": int(covered.sum()), "ref": [round(x, 1) for x in ref],
+                               "latest": sorted(round(w[0], 1) for w in latest["wheels"]),
+                               "found": [[k, int(a), int(b)] for k, a, b, _ in found]})
         self._update_flags(found, loop, wheels_by_col)
 
     def _update_flags(self, found, loop, wheels_by_col):
@@ -305,7 +389,11 @@ class WheelTracker:
     def _update_flags_locked(self, found, loop, wheels_by_col):
         active = set()
         for kind, first, last, meas in found:
-            match = next((k for k, f in self.flags.items() if f["kind"] == kind and f["active_loop"] >= 0
+            # any earlier flag of this kind at this place, active or not: a place that drops out for
+            # one evaluation or moves by a godet keeps its key (2026-09-07 replay: 68 keys for ~25 places)
+            # (a missing wheel is a change: once it has cleared, a new loss is a new alert)
+            match = next((k for k, f in self.flags.items() if f["kind"] == kind and k not in active
+                          and (f["active_loop"] >= 0 or kind != "wheel_missing")
                           and self._close(f, first, last)), None)
             if match is None:
                 tag = kind.upper()
@@ -333,7 +421,7 @@ class WheelTracker:
     def _close(self, f, first, last):
         span_a = {(f["first"] + k) % self.N for k in range(((f["last"] - f["first"]) % self.N) + 1)}
         span_b = {(first + k) % self.N for k in range(((last - first) % self.N) + 1)}
-        return any(abs(circ(a - b, self.N)) <= 1 for a in span_a for b in span_b)
+        return any(abs(circ(a - b, self.N)) <= FLAG_TOL for a in span_a for b in span_b)
 
     # ---- Tier 2 ------------------------------------------------------------------------------
     def events(self, pb2_response, requested=()):
