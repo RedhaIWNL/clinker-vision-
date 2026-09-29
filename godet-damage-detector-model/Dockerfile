@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY contract/ contract/
 COPY src/ src/
+# Calibration bundles (CAM-1 old, cam4, cam3, cam1new) are part of a release: a version is code + models.
+COPY model/ model/
 
 # Self-contained image: generate protobuf stubs at build time.
 RUN mkdir -p src/gen && touch src/gen/__init__.py && \

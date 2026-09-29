@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Go back to the version that ran before the last update (the alerts collected since are kept).
+#   deploy/server/cv-rollback
+
+# Run from a copy: going back replaces the project files, this script included.
+if [ -z "${CV_UPDATE_COPY:-}" ]; then
+  src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  tmp="$(mktemp -d)"; cp "$src"/cv-* "$tmp"/
+  CV_DIR="$(cd "$src/../.." && pwd)" CV_UPDATE_COPY=1 exec bash "$tmp/cv-rollback" "$@"
+fi
+source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
+
+step "Going back to the previous version"
+preflight || { pause_if_icon; exit 1; }
+# shellcheck disable=SC2010  # backup folders are timestamps (sorted by name = by date)
+b="$(ls -1d "$CV_BACKUPS"/*/ 2>/dev/null | grep -v -- '-used/$' | tail -1)"
+[ -n "$b" ] && [ -f "$b/git-ref" ] || { bad "No earlier version recorded (no update was made with the Update icon yet)."; pause_if_icon; exit 1; }
+prev="$(sed -n 's/^CV_VERSION=//p' "$b/env" 2>/dev/null | tail -1 | tr -d '\r')"
+echo "Now: $(env_get CV_VERSION)   ->   back to: ${prev:-the version built on this server} (saved $(basename "$b"))"
+read -r -p "Go back? [y/N] " yes
+case "$yes" in y|Y|yes|o|O|oui) ;; *) echo "Nothing changed."; pause_if_icon; exit 0 ;; esac
+
+git -C "$CV_DIR" checkout --quiet --detach "$(cat "$b/git-ref")"
+if [ -f "$b/env" ]; then cp "$b/env" .env; else rm -f .env; fi
+docker compose up -d --no-build --remove-orphans
+if wait_healthy 300; then echo; ok "The previous version is running."; step "Status"; show_status
+else echo; bad "The previous version did not start. Send the logs (Save logs icon)."; fi
+mv "$b" "${b%/}-used"          # the next rollback goes one version further back
+pause_if_icon

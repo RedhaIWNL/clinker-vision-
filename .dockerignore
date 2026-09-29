@@ -1,0 +1,11 @@
+# Pipeline image build context (deploy/pipeline.Dockerfile): Go sources only.
+.git
+godet-damage-detector-model
+data
+evidence
+logs
+model-state
+backups
+testdata/video
+config/config.yaml
+.env

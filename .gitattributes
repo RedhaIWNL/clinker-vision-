@@ -1,3 +1,6 @@
 # Model bundles are checksummed byte for byte: never convert their line endings.
 godet-damage-detector-model/model/** -text
 *.npy binary
+# Shell scripts run on the Linux server: always LF.
+*.sh text eol=lf
+deploy/server/cv-* text eol=lf

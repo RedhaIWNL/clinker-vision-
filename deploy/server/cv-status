@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Is Clinker Vision running? Version, the two services, and each camera.
+source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
+step "Clinker Vision status"
+preflight && show_status
+pause_if_icon

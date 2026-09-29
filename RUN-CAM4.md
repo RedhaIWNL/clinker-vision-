@@ -1,5 +1,10 @@
 # Running CAM-1 + CAM-4: step by step
 
+> **Since 2026-09-30, updating, starting, status, logs and going back are done with the desktop
+> icons: see [RUN-SERVER.md](RUN-SERVER.md).** Steps 1, 2, 5 and 9 below are what the Update, Save logs
+> and Roll back icons do for you; this page stays the reference for the camera settings (0, 3, 4, 4b,
+> 4c) and for reading the status and alerts (6-8b).
+
 Run these on the plant server, in the project folder (where `docker-compose.yml` is).
 Each step shows what you should see. If a step does not show it, stop there.
 

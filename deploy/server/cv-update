@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Update Clinker Vision to the newest version (or to the version given), in one go:
+#   1. find the newest version label on GitHub
+#   2. download its ready-made images while the running system keeps working
+#   3. stop, back up the alerts and settings, start the new version
+#   4. wait until it runs; if it does not start, go back to the previous version by itself
+#
+#   deploy/server/cv-update                 newest version
+#   deploy/server/cv-update v2026.09.30     a given version (also used by cv-rollback)
+#   options: --force (reinstall the same version), --no-rollback (used when going back)
+
+# Run from a copy: step 3 replaces the project files, this script included.
+if [ -z "${CV_UPDATE_COPY:-}" ]; then
+  src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  tmp="$(mktemp -d)"; cp "$src"/cv-* "$tmp"/
+  CV_DIR="$(cd "$src/../.." && pwd)" CV_UPDATE_COPY=1 exec bash "$tmp/cv-update" "$@"
+fi
+source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
+
+target=""; force=""; rollback=yes
+for a in "$@"; do
+  case "$a" in
+    --force) force=yes ;;
+    --no-rollback) rollback="" ;;
+    -*) bad "unknown option $a"; exit 2 ;;
+    *) target="$a" ;;
+  esac
+done
+
+finish() { pause_if_icon; exit "$1"; }
+
+step "Checking the server"
+preflight || finish 1
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  bad "Project files were changed by hand on this server:"
+  git status --short --untracked-files=no
+  echo "Keep a copy of them if needed, then undo them with:  git checkout -- ."
+  finish 1
+fi
+ok "Docker and settings found"
+
+step "Looking for the newest version"
+git fetch --quiet --tags --force origin || { bad "Cannot reach GitHub: check the internet connection."; finish 1; }
+[ -n "$target" ] || target="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+[ -n "$target" ] || { bad "No version has been published yet."; finish 1; }
+git rev-parse -q --verify "refs/tags/$target" >/dev/null || { bad "Version $target does not exist."; finish 1; }
+current="$(env_get CV_VERSION)"
+echo "Installed: ${current:-none (built on this server)}   ->   Newest: $target"
+if [ "$target" = "$current" ] && [ -z "$force" ]; then
+  ok "Already up to date."
+  step "Status"; show_status; finish 0
+fi
+
+step "Downloading version $target (the running system keeps working)"
+old_ref="$(git rev-parse HEAD)"
+git checkout --quiet --detach "$target" || { bad "Could not switch the project files to $target."; finish 1; }
+if ! CV_VERSION="$target" docker compose pull; then
+  git checkout --quiet --detach "$old_ref"
+  bad "The download failed. Nothing was changed; the old version is still running."
+  finish 1
+fi
+ok "Downloaded"
+
+step "Backing up alerts and settings"
+stamp="$(date +%Y%m%d-%H%M%S)"; b="$CV_BACKUPS/$stamp"
+mkdir -p "$b"
+docker compose stop >/dev/null 2>&1
+echo "$old_ref" > "$b/git-ref"
+[ -f .env ] && cp .env "$b/env"
+cp config/config.yaml "$b/config.yaml"
+[ -d data ] && find data -maxdepth 1 -name '*.db*' -exec cp {} "$b/" \;
+[ -d model-state ] && cp -r model-state "$b/model-state"
+ls -1d "$CV_BACKUPS"/*/ 2>/dev/null | head -n -10 | xargs -r rm -rf     # keep the last 10
+ok "Saved in backups/$stamp"
+
+step "Starting version $target"
+env_set CV_VERSION "$target"
+docker compose up -d --no-build --remove-orphans
+if wait_healthy 300; then
+  echo; ok "Version $target is running."
+  step "Status"; show_status; finish 0
+fi
+
+echo; bad "Version $target did not start correctly."
+docker compose logs --tail=30 model pipeline
+if [ -n "$rollback" ]; then
+  step "Going back to the previous version"
+  git checkout --quiet --detach "$old_ref"
+  if [ -f "$b/env" ]; then cp "$b/env" .env; else rm -f .env; fi
+  docker compose up -d --no-build --remove-orphans
+  if wait_healthy 300; then echo; ok "The previous version runs again. Send the logs (Save logs icon)."
+  else echo; bad "The previous version does not start either. Send the logs (Save logs icon)."; fi
+fi
+finish 1
