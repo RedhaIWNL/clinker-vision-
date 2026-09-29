@@ -14,7 +14,7 @@ show_status > "$tmp/status.txt" 2>&1
 http_get "http://127.0.0.1:$(web_port)/api/v1/status" > "$tmp/status.json" 2>/dev/null
 docker compose logs --no-color --tail=3000 model 2>&1 | hide > "$tmp/model.log"
 docker compose logs --no-color --tail=3000 pipeline 2>&1 | hide > "$tmp/pipeline.log"
-hide < config/config.yaml > "$tmp/config.yaml" 2>/dev/null
+read_config 2>/dev/null | hide > "$tmp/config.yaml"
 [ -f .env ] && cp .env "$tmp/env"
 df -h . > "$tmp/disk.txt" 2>&1; free -h >> "$tmp/disk.txt" 2>&1
 

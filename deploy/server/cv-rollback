@@ -6,7 +6,7 @@
 if [ -z "${CV_UPDATE_COPY:-}" ]; then
   src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   tmp="$(mktemp -d)"; cp "$src"/cv-* "$tmp"/
-  CV_DIR="$(cd "$src/../.." && pwd)" CV_UPDATE_COPY=1 exec bash "$tmp/cv-rollback" "$@"
+  CV_DIR="${CV_DIR:-$(cd "$src/../.." && pwd)}" CV_UPDATE_COPY=1 exec bash "$tmp/cv-rollback" "$@"
 fi
 source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
 

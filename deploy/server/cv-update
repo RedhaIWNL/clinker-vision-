@@ -13,7 +13,7 @@
 if [ -z "${CV_UPDATE_COPY:-}" ]; then
   src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   tmp="$(mktemp -d)"; cp "$src"/cv-* "$tmp"/
-  CV_DIR="$(cd "$src/../.." && pwd)" CV_UPDATE_COPY=1 exec bash "$tmp/cv-update" "$@"
+  CV_DIR="${CV_DIR:-$(cd "$src/../.." && pwd)}" CV_UPDATE_COPY=1 exec bash "$tmp/cv-update" "$@"
 fi
 source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
 
@@ -67,7 +67,7 @@ mkdir -p "$b"
 docker compose stop >/dev/null 2>&1
 echo "$old_ref" > "$b/git-ref"
 [ -f .env ] && cp .env "$b/env"
-cp config/config.yaml "$b/config.yaml"
+CV_VERSION="$target" read_config > "$b/config.yaml" && chmod 600 "$b/config.yaml" || warn "Could not copy the settings into the backup."
 [ -d data ] && find data -maxdepth 1 -name '*.db*' -exec cp {} "$b/" \;
 [ -d model-state ] && cp -r model-state "$b/model-state"
 ls -1d "$CV_BACKUPS"/*/ 2>/dev/null | head -n -10 | xargs -r rm -rf     # keep the last 10

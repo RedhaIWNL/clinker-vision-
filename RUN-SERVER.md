@@ -45,9 +45,9 @@ If the setup says Docker may not be used: `sudo usermod -aG docker $USER`, log o
 
 ## Changing which cameras run
 
-Still done in `config/config.yaml` (see `RUN-CAM4.md` sections 4, 4b, 4c). After a change, click
-**Update**; if the version is already the newest, run `deploy/server/cv-update --force` in a terminal
-to restart with the new settings.
+Still done in `config/config.yaml` (see `RUN-CAM4.md` sections 4, 4b, 4c). The file holds the camera
+passwords, so only the system may read it: open it with `sudo nano config/config.yaml`. After a change,
+run `deploy/server/cv-update --force` in a terminal to restart with the new settings.
 
 ## For the developer: publishing a version
 

@@ -39,19 +39,27 @@ preflight() {
   check_folders
 }
 
-# The two services run as user 65532 (not root): they must be able to write these folders and read the
-# settings (Docs/deployment.md). install.sh sets this up once.
+# The two services run as user 65532 (not root): they must be able to write these folders, and the
+# settings (camera passwords) must belong to that user alone, mode 600 - the pipeline refuses any
+# other access (Docs/deployment.md). install.sh sets this up once.
 CV_RW_DIRS="data evidence logs model-state"
 check_folders() {
   local d bad_dirs=""
   for d in $CV_RW_DIRS; do
     [ -d "$d" ] && [ "$(stat -c %u "$d")" = 65532 ] || bad_dirs="$bad_dirs $d"
   done
-  if [ -n "$bad_dirs" ] || ! { [ "$(stat -c %u config/config.yaml)" = 65532 ] || [ "$(( $(stat -c %a config/config.yaml) % 10 ))" -ge 4 ]; }; then
+  if [ -n "$bad_dirs" ] || [ "$(stat -c %u config/config.yaml)" != 65532 ] \
+     || [ "$(( 8#$(stat -c %a config/config.yaml) & 8#077 ))" != 0 ]; then
     bad "The system may not write its folders or read its settings. Run this once in a terminal:"
-    echo "   cd $CV_DIR && sudo mkdir -p $CV_RW_DIRS && sudo chown 65532:65532 $CV_RW_DIRS config/config.yaml"
+    echo "   cd $CV_DIR && sudo mkdir -p $CV_RW_DIRS && sudo chown 65532:65532 $CV_RW_DIRS config/config.yaml && sudo chmod 600 config/config.yaml"
     return 1
   fi
+}
+
+read_config() {  # print config/config.yaml (mode 600, user 65532) through Docker, which may read it
+  local img
+  img="$(docker compose config --images 2>/dev/null | grep pipeline | head -1)"
+  docker run --rm --user 0 --entrypoint cat -v "$CV_DIR/config/config.yaml:/f:ro" "$img" /f
 }
 
 images_present() {  # are the images of the current compose + .env on this server?

@@ -21,7 +21,8 @@ else
   echo "Your password is asked once, to let the services write their folders and read the settings."
   # shellcheck disable=SC2086
   sudo mkdir -p $CV_RW_DIRS && sudo chown 65532:65532 $CV_RW_DIRS config/config.yaml \
-    && ok "set" || { bad "could not set them"; exit 1; }
+    && sudo chmod 600 config/config.yaml && ok "set" || { bad "could not set them"; exit 1; }
+  echo "   (from now on, change the settings with:  sudo nano config/config.yaml)"
 fi
 chmod +x "$here"/cv-update "$here"/cv-rollback "$here"/cv-status "$here"/cv-logs
 
