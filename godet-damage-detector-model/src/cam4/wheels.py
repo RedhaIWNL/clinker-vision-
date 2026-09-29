@@ -117,7 +117,7 @@ class WheelTracker:
         old = cols < an[0, 0]                          # older than every anchor kept: 1:1 from the first
         scale[old] = 1.0
         pos = np.where(old, an[0, 1] + (cols - an[0, 0]), p0 + (cols - c0) * scale)
-        return pos, np.abs(scale - 1.0) <= SCALE_TOL
+        return pos, np.abs(scale - 1.0) <= self.cfg.get("scale_tol", SCALE_TOL)   # Camera 3's strip stretches +-6 %
 
     def _place_waiting(self):
         idn = self.ident

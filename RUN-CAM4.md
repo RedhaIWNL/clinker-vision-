@@ -105,6 +105,34 @@ Check it as for CAM-4 below, with `CAM-3` in the commands (`CAM-3 bundle loaded 
 It locks onto its chain map about 1 minute after the chain moves. When the conveyor runs
 empty, its status says `conveyor empty: plates not judged` and no alert is raised there.
 
+## 4c. Turn the new Camera 1 on (re-aimed view: wheels + godet outside damage, day and night)
+
+The old CAM-1 model does not fit the new view; the model now serves CAM-1 with the side-plate
+engine and bundle `model/cam1new` (already loaded by docker-compose; it replaces the old CAM-1 model).
+In `config/config.yaml`, replace the `CAM-1` block with:
+
+```yaml
+  - id: "CAM-1"
+    enabled: true
+    nvr_rtsp_url: "rtsp://admin:PASSWORD@192.168.1.200:554/cam/realmonitor?channel=1&subtype=0"
+    sample_interval_seconds: 1
+    queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "06:01"
+      stop: "06:00"
+      timezone: "Africa/Casablanca"
+```
+
+This runs almost 24 hours; the window closes one minute a day so the daily report is written.
+Check it as for CAM-4 below with `CAM-1` (`CAM-1: side-plate bundle ... replaces the old CAM-1 model`,
+then `CAM-1 bundle loaded ... godets=1210`). It locks onto its chain map about 40 s after the chain
+moves; alerts need a godet seen on 2 passes (about 16 minutes). Alerts:
+- `CAM-1:DAMAGE:<godet>:<loop>`: godet outside damage; its measurements say the type
+  (`damage_type` 1 = cut, 2 = out of line, 3 = both) and `severity` (0-1);
+- wheel alerts as for CAM-4 (gap, density, and `wheel_missing`: a known wheel absent on the 2 latest passes).
+Camera 1 sees the same side of the chain as CAM-4.
+
 ## 5. Build and start
 
 ```bash

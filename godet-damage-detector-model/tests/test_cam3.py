@@ -47,7 +47,7 @@ def test_bundle_is_camera_3_mirrored_with_band_fingerprint():
     assert b.camera_id == "CAM-3"
     assert b.v[0] < 0                                  # rail toward -x: the mirror of CAM-4
     assert b.chainmap.shape == (5, b.ident["loop_cols"]) and b.ident["godets"] == 1210
-    assert b.det["mode"] == "neighbours" and b.strip_rows == (20, 340)
+    assert b.det["mode"] == "neighbours" and b.strip_rows[0] == 20 and b.strip_rows[1] >= 340
     assert load_cam4_bundle(ROOT / "model" / "cam4").v[0] > 0   # CAM-4 unchanged
 
 
@@ -79,3 +79,25 @@ def test_empty_conveyor_is_reported_and_not_judged():
     h = pb2.GodetStateResponse().health
     eng.fill_health(h)
     assert "conveyor empty" in h.detail
+
+
+def test_bundle_has_disc_wheels():
+    b = load_cam4_bundle(BUNDLE)
+    assert b.wheels["mode"] == "disc" and b.wheel_template is not None
+    assert b.strip_rows[1] >= b.wheels["rows"][1] + b.wheels["play"]      # the stream keeps the wheel band
+
+
+@pytest.mark.skipif(not VIDEO.exists(), reason="CAM-3 day video not available")
+def test_wheels_are_found_on_real_video():
+    """2026-09-27 10:05: wheels ~1 per 3.9 godets (offline 2,637 in 146 min; user check 81/81, 0 false).
+    Measured from the lock over ~45 godets, where the local rate varies with the 3/4/5-godet spacing
+    (measured 14 wheels = 0.32 per godet); the full-recording replay is the precise check."""
+    eng = Cam4Engine(BUNDLE); lock_col = None
+    for i, j in enumerate(video_frames(10 * 3600 + 5 * 60, 3000)):
+        eng.on_frame(j, f"f{i}", i + 1)
+        if lock_col is None and eng.ident.locked:
+            lock_col = eng.stream.done
+    placed = eng.wheels.counters["wheels_total"]
+    godets = (eng.ident.anchors[-1][0] - lock_col) / eng.b.ident["pitch"]
+    assert placed >= 8 and 0.15 <= placed / godets <= 0.45
+    assert eng.wheels.counters["wheels_unplaced_total"] == 0

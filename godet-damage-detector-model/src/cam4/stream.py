@@ -185,6 +185,7 @@ class Cam4Stream:
         self.done = CTX                # next column to score
         self.sinks = []
         self.wheel_sinks = []
+        self.plate_sinks = []
         self.counters = {"frames_total": 0, "columns_total": 0, "stopped_frames_total": 0,
                          "weak_frames_total": 0, "gap_frames_total": 0, "empty_columns_total": 0}
         self.empty_recent = deque(maxlen=20)       # share of empty columns in the latest scored blocks
@@ -194,6 +195,10 @@ class Cam4Stream:
 
     def subscribe_wheels(self, fn):
         self.wheel_sinks.append(fn)
+
+    def subscribe_plates(self, fn):
+        """New Camera 1: fn(cols, grey strip rows row0..row1 (n columns), row0) for the plate tracker."""
+        self.plate_sinks.append(fn)
 
     # ---- per frame -------------------------------------------------------------------
     def on_frame(self, jpeg: bytes, frame_id=None, sequence_no=None):
@@ -299,7 +304,16 @@ class Cam4Stream:
             sl = slice(self.done - a, e - a)
             miss = self.fin_missing[self.done - self.fin0:e - self.fin0]
             cols = np.arange(self.done, e)
-            if self.mode == "neighbours":
+            if self.mode == "plates":                        # new Camera 1: damage judged per plate (plates.py)
+                idn = self.b.ident
+                fp = np.stack([win[r0 - self.row0:r1 - self.row0].mean(0) for r0, r1 in idn["fingerprint_bands"]])
+                fp = (fp - cv2.blur(fp, (301, 1))).astype(np.float32)[:, sl]
+                zero = np.zeros(len(cols), np.float32)
+                for fn in self.sinks:
+                    fn(cols, fp, zero, zero, miss)
+                for fn in self.plate_sinks:
+                    fn(cols, win[:, sl], self.row0)
+            elif self.mode == "neighbours":
                 fp, sev, top, empty = self._neighbour_block(win, a, cols)
                 self.counters["empty_columns_total"] += int(empty.sum())
                 self.empty_recent.append(float(empty.mean()))
@@ -352,6 +366,8 @@ class Cam4Stream:
     def _wheel_signals(self, win, bad, missing):
         """Rail stripe hidden / readable per column over a scoring window (grey only)."""
         w = self.wh
+        if w.get("mode") == "disc":
+            return self._disc_signals(win, bad, missing)
         r = lambda rr: win[rr[0] - self.row0:rr[1] - self.row0].mean(0)
         stripe = r(w["stripe_rows"]) - 0.5 * (r(w["stripe_above"]) + r(w["stripe_below"]))
         visible = median_filter(stripe, 2001)
@@ -361,6 +377,26 @@ class Cam4Stream:
         dusty = (visible < w["min_contrast_frac"] * self.stripe_level) | (
             uniform_filter1d(hidden.astype(np.float32), w["hidden_window"]) > w["max_hidden_frac"])
         readable = clean & ~missing & ~dusty
+        s0, s1 = w["strip_rows"]
+        strip = np.clip(win[s0 - self.row0:s1 - self.row0], 0, 255).astype(np.uint8)
+        return hidden, readable, strip
+
+    def _disc_signals(self, win, bad, missing):
+        """Camera 3 / new Camera 1: a wheel is a grey disc with a hub (calibration repo cam4/wheeldisc.py).
+        The bundle's wheel template is matched along the wheel band; each wheel found marks its own width
+        as "wheel here", which the wheel tracker turns into one wheel (the same tracker and rules as CAM-4)."""
+        w = self.wh; T = self.b.wheel_template
+        r0, r1 = w["rows"]; m, h = w["play"], w["half"]
+        band = np.ascontiguousarray(win[r0 - m - self.row0:r1 + m - self.row0], np.float32)
+        sc = np.full(win.shape[1], -1.0, np.float32)
+        r = cv2.matchTemplate(band, T, cv2.TM_CCOEFF_NORMED).max(0); sc[h:h + len(r)] = r
+        from scipy.ndimage import maximum_filter1d
+        peaks = np.flatnonzero((sc >= w["min_match"]) & (sc >= maximum_filter1d(sc, 2 * w["min_gap"] + 1)))
+        hidden = np.zeros(win.shape[1], bool)
+        for x in peaks:
+            hidden[max(0, x - h):x + h] = True
+        clean = uniform_filter1d((~bad).astype(np.float32), 41) > w.get("clean_frac", 0.9)
+        readable = clean & ~missing
         s0, s1 = w["strip_rows"]
         strip = np.clip(win[s0 - self.row0:s1 - self.row0], 0, 255).astype(np.uint8)
         return hidden, readable, strip

@@ -1,0 +1,190 @@
+{
+ "bundle_format": "cam4-1",
+ "camera_id": "CAM-1",
+ "lighting": "day",
+ "thresholds_id": "c1n-20260929",
+ "frame_size": [
+  2688,
+  1520
+ ],
+ "geometry": {
+  "p0": [
+   1500.0,
+   1150.0
+  ],
+  "travel_deg": 5.0,
+  "slit_half": 200,
+  "mosaic_pad": 20,
+  "odo_a": [
+   -160,
+   160
+  ],
+  "odo_b": [
+   -150,
+   50
+  ],
+  "slit_a": [
+   -6,
+   7
+  ],
+  "baselines": [
+   1,
+   2,
+   3,
+   4
+  ],
+  "rail_side": "-x"
+ },
+ "detector": {
+  "mode": "plates"
+ },
+ "identity": {
+  "loop_cols": 230553,
+  "godets": 1210,
+  "pitch": 190.53966942148762,
+  "phase": 89.0,
+  "piece": 4000,
+  "step": 2500,
+  "min_match": 0.45,
+  "fingerprint_std": [
+   41.90389633178711,
+   14.874001502990723,
+   16.052892684936523,
+   14.663530349731445,
+   19.279794692993164
+  ],
+  "reference": {
+   "run": "n00",
+   "start_col": 5000
+  },
+  "fingerprint_bands": [
+   [
+    0,
+    80
+   ],
+   [
+    80,
+    160
+   ],
+   [
+    160,
+    240
+   ],
+   [
+    240,
+    320
+   ],
+   [
+    320,
+    400
+   ]
+  ],
+  "scales": [
+   0.99,
+   1.0,
+   1.01
+  ]
+ },
+ "rules": {
+  "pass_alarm_relative": 1.0,
+  "godet_alarm_relative": 1.0,
+  "min_passes": 2,
+  "history_passes": 8,
+  "population_passes": 1210
+ },
+ "provenance": {
+  "labels": [
+   "labels/cam1new/outside_labels_v2_godets.json",
+   "labels/cam1new/outside_labels_v3_godets.json",
+   "labels/cam1new/outside_labels_v4_godets.json",
+   "labels/cam1new/outside_labels_v5_godets.json"
+  ],
+  "videos": [
+   "NVR_ch1_main_20260928000000_20260928010000.mp4",
+   "NVR_ch1_main_20260928010000_20260928020000.mp4",
+   "NVR_ch1_main_20260928070000_20260928080000.mp4",
+   "NVR_ch1_main_20260927170000_20260927180000.mp4"
+  ],
+  "plan": "CAM1_NEW_PLAN.md"
+ },
+ "strip_rows": [
+  0,
+  402
+ ],
+ "plates": {
+  "rows": [
+   40,
+   320
+  ],
+  "crop_w": 240,
+  "edge_rows": [
+   100,
+   280
+  ],
+  "dp": {
+   "lo": 150,
+   "hi": 235,
+   "step": 190.5,
+   "lam": 0.004,
+   "skip_cost": 4.0
+  },
+  "valley_rows": [
+   160,
+   300
+  ],
+  "valley_shift": 12,
+  "keep_passes": 8,
+  "min_passes": 2,
+  "spot_row": 200,
+  "stack": {
+   "mu": [
+    -3.31026,
+    -4.45418,
+    -5.20204,
+    0.2786
+   ],
+   "sd": [
+    5.00844,
+    4.6292,
+    5.13495,
+    0.75704
+   ],
+   "w": [
+    2.31186,
+    0.17421,
+    0.4369,
+    0.49235
+   ],
+   "b": -1.49971,
+   "threshold": 0.2643,
+   "features": [
+    "logit p_damaged (median over passes)",
+    "logit p_cut",
+    "logit p_out_of_line",
+    "valley relative (median over passes)"
+   ]
+  }
+ },
+ "wheels": {
+  "mode": "disc",
+  "rows": [
+   285,
+   392
+  ],
+  "play": 8,
+  "half": 65,
+  "min_match": 0.45,
+  "min_gap": 100,
+  "min_quality": 0.3,
+  "min_step": 4.0,
+  "clean_frac": 0.6,
+  "strip_rows": [
+   175,
+   402
+  ],
+  "min_width": 91,
+  "join_gap": 0,
+  "typical_width": 130,
+  "scale_tol": 0.08
+ }
+}

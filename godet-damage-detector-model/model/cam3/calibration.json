@@ -2,7 +2,7 @@
  "bundle_format": "cam4-1",
  "camera_id": "CAM-3",
  "lighting": "day",
- "thresholds_id": "c3d-20260928",
+ "thresholds_id": "c3d-20260929",
  "frame_size": [
   2688,
   1520
@@ -130,6 +130,28 @@
  },
  "strip_rows": [
   20,
-  340
- ]
+  372
+ ],
+ "wheels": {
+  "mode": "disc",
+  "rows": [
+   288,
+   362
+  ],
+  "play": 8,
+  "half": 50,
+  "min_match": 0.45,
+  "min_gap": 80,
+  "min_quality": 0.3,
+  "min_step": 3.0,
+  "clean_frac": 0.6,
+  "strip_rows": [
+   178,
+   372
+  ],
+  "min_width": 70,
+  "join_gap": 0,
+  "typical_width": 100,
+  "scale_tol": 0.08
+ }
 }

@@ -408,6 +408,11 @@ func ValidateResponseForCamera(expectedFrameID, cameraID string, response *infer
 	if !known {
 		required = tier1RequiredScalars["CAM-1"]
 	}
+	// The re-aimed Camera 1 (2026-09-27) is served by the side-plate engine when its bundle is loaded;
+	// its responses carry the side-plate measurements instead of the old model's.
+	if _, sidePlate := response.GetScalarMeasurements()["chain_pos"]; cameraID == "CAM-1" && sidePlate {
+		required = tier1RequiredScalars["CAM-4"]
+	}
 	for _, name := range required {
 		if _, ok := response.GetScalarMeasurements()[name]; !ok {
 			return nil, fmt.Errorf("%w: scalar_measurements[%s] is required", ErrInvalidResponse, name)

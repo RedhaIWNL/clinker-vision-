@@ -36,6 +36,9 @@ class Cam4Bundle:
     version: str             # <chainmap-sha8>+<build>+<thresholds-id>
     wheels: dict | None = None   # wheel (galet) detector settings; None = no wheel tracking
     strip_rows: tuple | None = None  # mosaic rows the stream keeps; None = CAM-4's 40..340
+    wheel_template: np.ndarray | None = None   # disc wheels (Camera 3, new Camera 1): the wheel picture to match
+    plates: dict | None = None                 # new Camera 1: godet outside damage per plate (cam4/plates.py)
+    plate_models: tuple = ()                   # its ONNX files
 
 
 def load_cam4_bundle(d) -> Cam4Bundle:
@@ -48,7 +51,8 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         h, _, name = line.partition("  ")
         if name.strip():
             want[name.strip()] = h.strip()
-    for name in ("calibration.json", "chainmap.npy"):
+    extra = tuple(n for n in ("wheel_template.npy", "plate_cnn_s0.onnx", "plate_cnn_s1.onnx", "plate_cnn_s2.onnx") if (d / n).exists())
+    for name in ("calibration.json", "chainmap.npy") + extra:
         p = d / name
         if want.get(name) != hashlib.sha256(p.read_bytes()).hexdigest():
             raise BundleError(f"side-plate bundle checksum mismatch on {name}: refuse to serve")
@@ -77,4 +81,6 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         baselines=tuple(g["baselines"]), det=cal["detector"], ident=idn, rules=cal["rules"],
         chainmap=chain, thresholds_id=cal["thresholds_id"], camera_id=cal.get("camera_id", "CAM-4"), wheels=cal.get("wheels"),
         strip_rows=tuple(cal["strip_rows"]) if "strip_rows" in cal else None,
+        wheel_template=np.load(d / "wheel_template.npy").astype(np.float32) if (d / "wheel_template.npy").exists() else None,
+        plates=cal.get("plates"), plate_models=tuple(d / n for n in extra if n.endswith(".onnx")),
         version=f"{sha8}+{build}+{cal['thresholds_id']}")

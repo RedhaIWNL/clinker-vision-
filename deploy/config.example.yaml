@@ -3,15 +3,20 @@ server:
   web_port: 8080
 
 cameras:
-  # CAM-1 was re-aimed (~2026-09-27): it now sees the chain end after the sprocket. The
-  # delivered CAM-1 model was calibrated on the OLD view and cannot work on the new one
-  # (it only reports "template lost"). Keep it disabled until the new Camera 1 method ships.
+  # CAM-1 was re-aimed (~2026-09-27): it now sees the chain end after the sprocket (the CAM-4 side).
+  # The model serves it with the side-plate engine and bundle model/cam1new (loaded by docker-compose):
+  # wheels and godet outside damage (cut / out of line), day and night. Almost 24 h: the window closes
+  # one minute a day so the daily report CAM-1-day-<date>.md is written. Enable it as in RUN-CAM4.md 4c.
   - id: "CAM-1"
     enabled: false
     nvr_rtsp_url: "rtsp://admin:REDACTED@192.168.1.200:554/cam/realmonitor?channel=1&subtype=0"
-    # Retained for config compatibility; the v2 CAM-1 lane is dense and does not sample.
     sample_interval_seconds: 1
     queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "06:01"
+      stop: "06:00"
+      timezone: "Africa/Casablanca"
   - id: "CAM-2"
     enabled: false
     sample_interval_seconds: 1

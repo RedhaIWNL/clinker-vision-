@@ -186,8 +186,13 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
             from src.cam4.engine import Cam4Engine
             for d in dirs:
                 eng = Cam4Engine(d, self.store)                   # BundleError: fail startup
-                if eng.camera_id in self.sideplate or eng.camera_id in SUPPORTED_CAMERAS:
+                if eng.camera_id in self.sideplate:
                     raise ValueError(f"two bundles for {eng.camera_id}")
+                if eng.camera_id in SUPPORTED_CAMERAS:
+                    # the new Camera 1 view (re-aimed 2026-09-27): its side-plate bundle replaces the old CAM-1
+                    # model; side-plate engines are asked first in Infer and GetGodetState
+                    LOG.warning("%s: side-plate bundle %s replaces the old %s model", eng.camera_id, eng.version,
+                                eng.camera_id)
                 self.sideplate[eng.camera_id] = eng
         self.health_servicer = health_servicer
         self.serving = False

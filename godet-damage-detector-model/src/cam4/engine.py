@@ -26,6 +26,7 @@ import numpy as np
 from .bundle import load_cam4_bundle
 from .identity import Cam4History, Cam4Identity
 from .stream import Cam4Stream
+from .plates import PlateTracker
 from .wheels import WheelTracker
 
 LOG = logging.getLogger("clinker-vision-model.cam4")
@@ -72,6 +73,8 @@ class Cam4Engine:
         self.block_peaks = deque(maxlen=2 * self.n)
         self.pass_alarm = float(self.b.rules["pass_alarm_relative"])
         self.wheels = WheelTracker(self.b, None, self.camera_id, self._queue_evidence) if self.b.wheels else None
+        # new Camera 1: godet outside damage per plate (cut / out of line), instead of the overlap history
+        self.plates = PlateTracker(self.b, None, self.camera_id, self._retain_plate) if self.b.plates else None
         self._build_front_end(None, None)
         if store is not None:
             snap = store.load_kv(self.state_key)
@@ -80,6 +83,8 @@ class Cam4Engine:
                 self._build_front_end(snap["stream"], snap["identity"])
                 if self.wheels is not None:
                     self.wheels.restore(snap.get("wheels"))
+                if self.plates is not None:
+                    self.plates.restore(snap.get("plates"))
                 LOG.info("%s state restored: %d godets with history", self.camera_id, len(self.hist.g))
             elif snap is not None:
                 LOG.warning("%s stored state is for bundle %s, not %s: starting fresh history", self.camera_id,
@@ -100,6 +105,9 @@ class Cam4Engine:
         if self.wheels is not None:
             self.wheels.ident = self.ident
             self.stream.subscribe_wheels(self.wheels.on_wheels)
+        if self.plates is not None:
+            self.plates.ident = self.ident
+            self.stream.subscribe_plates(self.plates.on_strip)
         self.ring.clear()
 
     # ---- sequencing lane (same policy as CAM-1: reorder window 64, gaps declared) -----
@@ -178,8 +186,31 @@ class Cam4Engine:
                 best = rec
         return best
 
+    def _retain_plate(self, col):
+        """New Camera 1: keep the frame that shows the plate at this chain column; evidence for its alert."""
+        rec = self._nearest(self.ring.values(), int(col))
+        if rec is None:
+            return None
+        with self.lock:
+            if rec["frame_id"] not in self.retained:
+                self.retained[rec["frame_id"]] = {k: v for k, v in rec.items() if k != "jpeg"}
+                while len(self.retained) > RETAINED_MAX:
+                    self.retained.popitem(last=False)
+                self.outbox.append(rec)
+                self.counters["retained_frames_total"] += 1
+        a = rec["s"] - (col - self.b.pad)
+        bb = self.b.plates["spot_row"] - self.b.slit_half
+        x, y = self.b.p0 + a * self.b.u + bb * self.b.v
+        W, H = self.b.frame_size; h = 1.4 * EVIDENCE_HALF
+        x0, y0, x1, y1 = max(0.0, x - h), max(0.0, y - h), min(W, x + h), min(H, y + h)
+        ts = rec["captured_at"]
+        return {"frame_id": rec["frame_id"], "box": [x0 / W, y0 / H, (x1 - x0) / W, (y1 - y0) / H],
+                "captured_at": None if ts is None else [int(ts.seconds), int(ts.nanos)]}
+
     def _on_columns(self, cols, fp_raw, sev, top, missing):
         """Scored columns: retain the frame of every strong half-plate block."""
+        if self.plates is not None:
+            return                                         # the plate tracker keeps its own evidence
         for i0 in range(0, len(cols), RETAIN_BLOCK):
             s = np.where(missing[i0:i0 + RETAIN_BLOCK], -np.inf, sev[i0:i0 + RETAIN_BLOCK])
             if not np.isfinite(s).any():
@@ -222,6 +253,8 @@ class Cam4Engine:
 
     # ---- passes ------------------------------------------------------------------------------
     def _on_pass(self, rec):
+        if self.plates is not None:
+            return                                         # new Camera 1: damage is judged per plate
         rec.godet_id = self.external_id(rec.godet_id)
         col = rec.best_col
         with self.lock:
@@ -263,6 +296,8 @@ class Cam4Engine:
                         "saved_at": time.time()}
             if self.wheels is not None:
                 snap["wheels"] = self.wheels.snapshot()
+            if self.plates is not None:
+                snap["plates"] = self.plates.snapshot()
             self.store.save_kv(self.state_key, snap)
         except Exception as e:                                   # never take the stream down
             LOG.error("%s snapshot failed: %s", self.camera_id, e)
@@ -302,6 +337,26 @@ class Cam4Engine:
                     ev.occurred_at.seconds, ev.occurred_at.nanos = e["captured_at"]
         if self.wheels is not None:
             self.wheels.events(r, requested)
+        if self.plates is not None:
+            TYPES = {"cut": 1.0, "out of line": 2.0, "cut + out of line": 3.0}
+            for g, d in sorted(self.plates.confirmed().items()):
+                gid = self.external_id(g)
+                if requested and gid not in requested:
+                    continue
+                ev = r.events.add()
+                ev.event_key = f"{self.camera_id}:DAMAGE:{gid}:{d['confirmed_loop']}"
+                ev.kind = "damage"; ev.godet_id = gid; ev.loop_no = int(d["confirmed_loop"]); ev.state = "confirmed"
+                ev.measurements["severity"] = float(d["score"])
+                ev.measurements["passes_seen"] = float(len(d["passes"]))
+                ev.measurements["cut"] = float(d["cut"]); ev.measurements["out_of_line"] = float(d["out_of_line"])
+                ev.measurements["damage_type"] = TYPES[self.plates.damage_type(d)]   # 1 cut, 2 out of line, 3 both
+                e = d.get("evidence")
+                if e and e.get("frame_id"):
+                    ev.evidence_frame_id = e["frame_id"]
+                    bx = e["box"]; ev.evidence_box.x, ev.evidence_box.y = bx[0], bx[1]
+                    ev.evidence_box.width, ev.evidence_box.height = bx[2], bx[3]
+                    if e.get("captured_at"):
+                        ev.occurred_at.seconds, ev.occurred_at.nanos = e["captured_at"]
         wanted = sorted(requested) or sorted(
             g for g, v in G.items() if v["state"] in ("confirmed", "suspect"))
         for g in wanted:
@@ -328,8 +383,10 @@ class Cam4Engine:
             lines.append("conveyor stopped")
         if s.empty_share() > 0.5:
             lines.append("conveyor empty: plates not judged")
-        if not self.hist.ready():
-            lines.append(f"history building: {len(self.hist.pop)} passes of 300 needed")
+        hist_ready = (self.plates.counters["plates_total"] >= 300) if self.plates is not None else self.hist.ready()
+        if not hist_ready:
+            n_done = self.plates.counters["plates_total"] if self.plates is not None else len(self.hist.pop)
+            lines.append(f"history building: {n_done} {'plates' if self.plates is not None else 'passes'} of 300 needed")
         view_lost = len(quals) >= 100 and float(np.median(quals)) < 0.25
         share = self.hist.confirmed_share()
         if view_lost:
@@ -341,12 +398,12 @@ class Cam4Engine:
         elif not self.ident.locked:
             status = "not_ready"
             lines.insert(0, "locking onto the chain map (needs about 1 minute of moving chain)")
-        elif self.hist.ready() and len(self.hist.g) >= 300 and share > POPULATION_ALARM:
+        elif self.plates is None and self.hist.ready() and len(self.hist.g) >= 300 and share > POPULATION_ALARM:
             status = "population_alarm"
             lines.insert(0, f"POPULATION: {share:.0%} of godets confirmed - check lighting/view before trusting alerts")
         else:
             status = "ok"
-        h.ready = bool(self.ident.locked and self.hist.ready())
+        h.ready = bool(self.ident.locked and hist_ready)
         h.loop_locked = bool(self.ident.locked)
         h.status = status
         h.detail = "; ".join(lines) if lines else "all clear"
@@ -362,5 +419,7 @@ class Cam4Engine:
         if self.wheels is not None:
             items.update({f"wheel_{k}": v for k, v in self.wheels.counters.items()})
             items.update({f"wheel_flags_{k}": v for k, v in self.wheels.active_counts().items()})
+        if self.plates is not None:
+            items.update({f"plates_{k}" if not k.startswith("plate") else k: v for k, v in self.plates.counters.items()})
         for k, v in items.items():
             h.counters[k] = float(v)
