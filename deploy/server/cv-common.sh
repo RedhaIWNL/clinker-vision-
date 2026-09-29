@@ -36,6 +36,27 @@ preflight() {
   docker info >/dev/null 2>&1 || { bad "Docker is not running (or this user may not use it: add it to the 'docker' group)."; return 1; }
   docker compose version >/dev/null 2>&1 || { bad "'docker compose' is missing (install the docker-compose-plugin package)."; return 1; }
   [ -f config/config.yaml ] || { bad "config/config.yaml is missing: copy deploy/config.example.yaml there and fill in the cameras."; return 1; }
+  check_folders
+}
+
+# The two services run as user 65532 (not root): they must be able to write these folders and read the
+# settings (Docs/deployment.md). install.sh sets this up once.
+CV_RW_DIRS="data evidence logs model-state"
+check_folders() {
+  local d bad_dirs=""
+  for d in $CV_RW_DIRS; do
+    [ -d "$d" ] && [ "$(stat -c %u "$d")" = 65532 ] || bad_dirs="$bad_dirs $d"
+  done
+  if [ -n "$bad_dirs" ] || ! { [ "$(stat -c %u config/config.yaml)" = 65532 ] || [ "$(( $(stat -c %a config/config.yaml) % 10 ))" -ge 4 ]; }; then
+    bad "The system may not write its folders or read its settings. Run this once in a terminal:"
+    echo "   cd $CV_DIR && sudo mkdir -p $CV_RW_DIRS && sudo chown 65532:65532 $CV_RW_DIRS config/config.yaml"
+    return 1
+  fi
+}
+
+images_present() {  # are the images of the current compose + .env on this server?
+  local i
+  for i in $(docker compose config --images 2>/dev/null); do docker image inspect "$i" >/dev/null 2>&1 || return 1; done
 }
 
 wait_healthy() {  # up to $1 seconds for the model (healthy) and the pipeline (answers on the web port)

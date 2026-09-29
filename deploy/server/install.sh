@@ -12,8 +12,17 @@ docker compose version >/dev/null 2>&1 && ok "docker compose" || { bad "docker c
 if ! docker info >/dev/null 2>&1; then
   bad "This user may not use Docker. Run:  sudo usermod -aG docker $USER   then log out and in again."; fail=1
 fi
-[ -f config/config.yaml ] && ok "config/config.yaml" || warn "config/config.yaml is missing (copy deploy/config.example.yaml and fill in the cameras)"
+[ -f config/config.yaml ] && ok "config/config.yaml" || { bad "config/config.yaml is missing (copy deploy/config.example.yaml and fill in the cameras)"; fail=1; }
 [ -z "$fail" ] || { bad "Fix the lines above, then run this again."; exit 1; }
+
+step "Folder permissions (the services run as user 65532)"
+if check_folders >/dev/null 2>&1; then ok "already set"
+else
+  echo "Your password is asked once, to let the services write their folders and read the settings."
+  # shellcheck disable=SC2086
+  sudo mkdir -p $CV_RW_DIRS && sudo chown 65532:65532 $CV_RW_DIRS config/config.yaml \
+    && ok "set" || { bad "could not set them"; exit 1; }
+fi
 chmod +x "$here"/cv-update "$here"/cv-rollback "$here"/cv-status "$here"/cv-logs
 
 step "Creating the icons"

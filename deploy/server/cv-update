@@ -87,6 +87,10 @@ if [ -n "$rollback" ]; then
   step "Going back to the previous version"
   git checkout --quiet --detach "$old_ref"
   if [ -f "$b/env" ]; then cp "$b/env" .env; else rm -f .env; fi
+  if ! images_present; then
+    bad "There is no earlier version on this server to go back to. Send the logs (Save logs icon)."
+    finish 1
+  fi
   docker compose up -d --no-build --remove-orphans
   if wait_healthy 300; then echo; ok "The previous version runs again. Send the logs (Save logs icon)."
   else echo; bad "The previous version does not start either. Send the logs (Save logs icon)."; fi
