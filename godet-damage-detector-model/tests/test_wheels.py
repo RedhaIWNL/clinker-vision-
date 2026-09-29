@@ -55,10 +55,11 @@ def make():
     return b, WheelTracker(b, FakeIdentity(), "CAM-4")
 
 
-def feed(t, b, loops, first_loop=0, drop=None, unreadable=None, shift=None):
+def feed(t, b, loops, first_loop=0, drop=None, unreadable=None, shift=None, holes=0):
     L, P = b.ident["loop_cols"], b.ident["pitch"]
     for lp in range(first_loop, first_loop + loops):
         hidden = np.zeros(L, bool)
+        readable = np.ones(L, bool)
         for g in wheel_godets(b.ident["godets"]):
             if drop and g == drop[0] and lp >= drop[1]:
                 continue
@@ -66,7 +67,7 @@ def feed(t, b, loops, first_loop=0, drop=None, unreadable=None, shift=None):
             if shift and lp == shift[0] and shift[1] <= g <= shift[2]:
                 c += shift[3]                          # this pass placed a stretch a little off
             hidden[c - 60:c + 60] = True
-        readable = np.ones(L, bool)
+            readable[c - 60:c - 60 + holes] = False    # a few unreadable columns inside the wheel
         if unreadable:
             readable[int(unreadable[0] * P):int((unreadable[1] + 1) * P)] = False
         cols = np.arange(lp * L, (lp + 1) * L)
@@ -99,6 +100,22 @@ def test_gap_and_density_rules_fire_where_planted():
     assert [d[:2] for d in dens] == [(299, 302)], dens              # windows 299-301 and 300-302 merged
     assert "wheel_missing" not in f
     assert t.counters["wheels_total"] >= 3 * 295
+
+
+def test_disc_wheels_survive_a_few_unreadable_columns():
+    """New Camera 1 night, 2026-09-29: 28 of 376 wheels had a few unreadable columns and were dropped,
+    each one a false gap. A disc wheel needs half its columns readable; CAM-4's rail rule stays strict."""
+    b = load_cam4_bundle(BUNDLE)
+    b.ident = dict(b.ident, phase=0.0)
+    b.wheels = dict(b.wheels, mode="disc")
+    t = WheelTracker(b, FakeIdentity(), "CAM-1")
+    feed(t, b, loops=3, holes=30)                                    # 25 % of every wheel unreadable
+    f = flags(t)
+    assert [x[:2] for x in f.get("wheel_gap", [])] == [(101, 107)], f.get("wheel_gap")
+    assert t.counters["wheels_total"] >= 3 * 295
+    b, t = make()                                                    # CAM-4: a wheel must be fully readable
+    feed(t, b, loops=3, holes=30)
+    assert t.counters["wheels_total"] == 0
 
 
 def test_keys_are_stable_over_loops():

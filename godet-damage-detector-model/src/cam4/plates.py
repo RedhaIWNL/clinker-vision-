@@ -107,6 +107,10 @@ class PlateTracker:
         g = g.astype(np.float32)
         if self.buf is None or cols[0] != self.buf0 + self.buf.shape[1]:
             self.buf, self.buf0, self.edge, self.last_joint = g, int(cols[0]), np.zeros(0, np.float32), None
+            # a stream restart numbers columns from 0 again: plates of the old numbering can never be cropped
+            # and blocked every later plate (2026-09-29 replay: no plate scored after the second video)
+            self.counters["plates_unplaced_total"] += len(self.pending)
+            self.pending.clear(); self.prev = None
         else:
             self.buf = np.concatenate([self.buf, g], 1)
         er = [r - row0 for r in self.c["edge_rows"]]

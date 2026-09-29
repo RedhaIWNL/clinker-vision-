@@ -384,12 +384,16 @@ class Cam4Stream:
     def _disc_signals(self, win, bad, missing):
         """Camera 3 / new Camera 1: a wheel is a grey disc with a hub (calibration repo cam4/wheeldisc.py).
         The bundle's wheel template is matched along the wheel band; each wheel found marks its own width
-        as "wheel here", which the wheel tracker turns into one wheel (the same tracker and rules as CAM-4)."""
+        as "wheel here", which the wheel tracker turns into one wheel (the same tracker and rules as CAM-4).
+        The template may hold one picture per lighting (new Camera 1: night, morning, evening); the best
+        match wins. A night picture alone matched day wheels at 0.14-0.17 and found none (2026-09-29)."""
         w = self.wh; T = self.b.wheel_template
         r0, r1 = w["rows"]; m, h = w["play"], w["half"]
         band = np.ascontiguousarray(win[r0 - m - self.row0:r1 + m - self.row0], np.float32)
         sc = np.full(win.shape[1], -1.0, np.float32)
-        r = cv2.matchTemplate(band, T, cv2.TM_CCOEFF_NORMED).max(0); sc[h:h + len(r)] = r
+        for t in (T if T.ndim == 3 else T[None]):
+            r = cv2.matchTemplate(band, np.ascontiguousarray(t), cv2.TM_CCOEFF_NORMED).max(0)
+            sc[h:h + len(r)] = np.maximum(sc[h:h + len(r)], r)
         from scipy.ndimage import maximum_filter1d
         peaks = np.flatnonzero((sc >= w["min_match"]) & (sc >= maximum_filter1d(sc, 2 * w["min_gap"] + 1)))
         hidden = np.zeros(win.shape[1], bool)

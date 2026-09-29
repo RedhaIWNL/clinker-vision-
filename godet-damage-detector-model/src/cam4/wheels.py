@@ -4,7 +4,10 @@ Streaming port of the calibration repo's cam4/wheels.py + cam4/wheelmap.py (WHEE
 
 Per scored column the stream says whether the rail stripe is hidden and whether the strip is
 readable. A wheel is a hidden stretch at least `min_width` columns wide, fully readable (pieces
-split by a bright hub are joined; two touching wheels are split by the typical width). Each wheel
+split by a bright hub are joined; two touching wheels are split by the typical width). Disc wheels
+(CAM-3, new Camera 1) are found by their shape, so half readable is enough (`min_readable`, as the
+offline map): on 20 night minutes the full rule dropped 28 of 376 wheels, most 70-99 % readable,
+and each dropped wheel became a false gap (2026-09-29). Each wheel
 is put on the chain map through identity; each chain loop is one pass.
 
 After every completed pass once 3 passes of the current identity lock exist (placements of
@@ -66,13 +69,14 @@ def local_shift(base, other, x, L):
 class WheelTracker:
     def __init__(self, bundle, ident, camera_id, evidence_sink=None):
         self.cfg = dict(DEFAULTS, **(getattr(bundle, "wheels", None) or {}))
+        self.cfg.setdefault("min_readable", 0.5 if self.cfg.get("mode") == "disc" else 1.0)
         self.ident = ident
         self.cam = camera_id
         self.L = int(bundle.ident["loop_cols"]); self.P = float(bundle.ident["pitch"])
         self.phase = float(bundle.ident["phase"]); self.N = int(bundle.ident["godets"])
         self.evidence_sink = evidence_sink
         self.run = None                    # [start, end] of the open hidden run (absolute columns)
-        self.run_ok = True
+        self.run_rd = self.run_n = 0       # readable / all columns of the open run
         self.waiting = deque()             # wheel centre columns not yet bracketed by anchors
         self.cover_wait = deque()          # readable columns (subsampled) not yet bracketed by anchors
         self.passes = OrderedDict()        # loop -> {"wheels": [(pos, col)], "cover": bool[L/COVER_RES]}
@@ -173,21 +177,21 @@ class WheelTracker:
             if h:
                 if self.run is not None and c - self.run[1] <= self.cfg["join_gap"]:
                     self.run[1] = c + 1
-                    self.run_ok &= r
+                    self.run_rd += r; self.run_n += 1
                 else:
                     self._close_run()
-                    self.run, self.run_ok = [c, c + 1], r
+                    self.run, self.run_rd, self.run_n = [c, c + 1], int(r), 1
             elif self.run is not None:
                 if c - self.run[1] > self.cfg["join_gap"]:
                     self._close_run()
                 else:
-                    self.run_ok &= r                   # the gap inside a joined wheel must be readable too
+                    self.run_rd += r; self.run_n += 1  # the gap inside a joined wheel counts too
         if pos is not None and self.ident.anchors:     # every wheel before the last anchor is placed
             self._maybe_evaluate(self._loop(self.ident.anchors[-1][1]))
 
     def _close_run(self):
-        run, ok, self.run = self.run, self.run_ok, None
-        if run is None or not ok:
+        run, self.run = self.run, None
+        if run is None or self.run_rd < self.cfg["min_readable"] * self.run_n - 1e-9:
             return
         a, b = run
         w = b - a

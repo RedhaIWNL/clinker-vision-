@@ -65,6 +65,42 @@ def test_valley_finds_a_thin_dark_line_not_a_step():
     assert valley_score(cut) > 5 * max(valley_score(step), 1e-3)
 
 
+class FakeIdentity:
+    """Locked; map position = column. Anchors trail the newest column by 2000 (a piece)."""
+    def __init__(self):
+        from collections import deque
+        self.locked = True
+        self.anchors = deque(maxlen=16)
+        self.loop_base, self.loop_offset = 0, 0
+
+    def advance(self, newest_col):
+        c = newest_col - 2000
+        if not self.anchors or c > self.anchors[-1][0]:
+            self.anchors.append((c, float(c)))
+
+
+def test_plates_go_on_after_a_stream_restart():
+    """2026-09-29 replay: after the second video (a sequence restart: the stream numbers columns from 0
+    again) not one plate was scored; plates of the old numbering waited for their crop forever."""
+    from src.cam4.plates import PlateTracker
+    b = load_cam4_bundle(BUNDLE)
+    t = PlateTracker(b, FakeIdentity(), "CAM-1")
+    g = np.full((402, 1000), 120.0, np.float32)
+    g[:, ::190] = 250.0                                         # a plate joint every 190 columns
+
+    def run(first, n):
+        for c0 in range(first, first + n, 1000):
+            t.ident.advance(c0 + 999)
+            t.on_strip(np.arange(c0, c0 + 1000), np.roll(g, -(c0 % 190), 1), 0)
+
+    run(1_000_000, 12000)
+    before = t.counters["plates_total"]
+    assert before > 20 and t.pending                            # plates still waiting when the stream restarts
+    t.ident = FakeIdentity()                                    # the engine rebuilds identity on a restart
+    run(0, 12000)
+    assert t.counters["plates_total"] >= before + 20
+
+
 @pytest.mark.skipif(not NIGHT.exists(), reason="new Camera 1 night video not available")
 def test_night_video_locks_and_judges_plates():
     eng = Cam4Engine(BUNDLE)
