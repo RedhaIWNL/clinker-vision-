@@ -8,7 +8,7 @@ WINDOWS="CAM-3=09:00-12:30 CAM-4=12:30-16:00 CAM-1=16:00-09:00"
 
 set -u
 [ "$(id -u)" = 0 ] || exec sudo bash "$0" "$@"
-DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"      # or the project folder given (script downloaded)
 cd "$DIR" || exit 1
 [ -f config/config.yaml ] || { echo "config/config.yaml not found in $DIR"; exit 1; }
 mkdir -p backups
