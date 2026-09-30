@@ -289,3 +289,26 @@ func TestWheelEventIsStoredAsGaletAlert(t *testing.T) {
 		t.Fatalf("unknown kinds must be ignored: %v %v", alerts, err)
 	}
 }
+
+func TestSidePlateEventWithoutBoxGetsNoOldFixedBox(t *testing.T) {
+	// 2026-09-30: new Camera 1 alerts arrived without a box and were drawn with the old CAM-1 fixed
+	// box, which sits on the roof of the re-aimed view. A side-plate event without a box is stored as
+	// the whole frame and nothing is drawn.
+	root := t.TempDir()
+	alertStore := openProcessorStore(t, root)
+	live := processorFrame()
+	live.CameraID = "CAM-1"
+	g := &inferencev2.GodetState{GodetId: 44, State: "confirmed", LastSeenLoop: 2}
+	e := &inferencev2.GodetAlertEvent{EventKey: "CAM-1:DAMAGE:44:2", Kind: "damage", GodetId: 44, LoopNo: 2, State: "confirmed",
+		Measurements: map[string]float64{"severity": 0.9, "damage_type": 3}}
+	if _, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m1", Godets: []*inferencev2.GodetState{g}, Events: []*inferencev2.GodetAlertEvent{e}, Health: &inferencev2.Health{}}, live, 85, filepath.Join(root, "evidence"), alertStore, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := alertStore.ListAlerts(context.Background(), store.ListFilter{Limit: 10})
+	if len(list.Alerts) != 1 {
+		t.Fatalf("alerts = %#v", list.Alerts)
+	}
+	if b := list.Alerts[0].BoundingBox; b.X != 0 || b.Y != 0 || b.Width != 1 || b.Height != 1 {
+		t.Fatalf("box = %+v, want the whole frame (not the old fixed CAM-1 box)", b)
+	}
+}

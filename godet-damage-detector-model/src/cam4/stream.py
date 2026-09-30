@@ -20,6 +20,7 @@ Scores are computed every NB_STEP absolute columns and held, as in the batch too
 """
 from __future__ import annotations
 
+import time
 from collections import deque
 
 import cv2
@@ -187,8 +188,11 @@ class Cam4Stream:
         self.wheel_sinks = []
         self.plate_sinks = []
         self.counters = {"frames_total": 0, "columns_total": 0, "stopped_frames_total": 0,
-                         "weak_frames_total": 0, "gap_frames_total": 0, "empty_columns_total": 0}
+                         "weak_frames_total": 0, "gap_frames_total": 0, "empty_columns_total": 0,
+                         "repeated_frames_total": 0}
         self.empty_recent = deque(maxlen=20)       # share of empty columns in the latest scored blocks
+        self.last_jpeg = None
+        self.arrivals = deque(maxlen=250)          # (wall time, repeated?) of the latest frames
 
     def subscribe(self, fn):
         self.sinks.append(fn)
@@ -202,6 +206,19 @@ class Cam4Stream:
 
     # ---- per frame -------------------------------------------------------------------
     def on_frame(self, jpeg: bytes, frame_id=None, sequence_no=None):
+        # A picture byte-identical to the previous one is not the chain standing still (a real image
+        # always has sensor noise): the camera stream lost frames and the decoder repeated the last one
+        # (plant server 2026-09-30, model too busy: 4 of 5 frames repeated, read as "conveyor stopped").
+        # Counted as a lost frame: the chain keeps its recent speed.
+        repeated = self.last_jpeg is not None and len(jpeg) == len(self.last_jpeg) and jpeg == self.last_jpeg
+        self.arrivals.append((time.monotonic(), repeated))
+        if repeated:
+            self.counters["repeated_frames_total"] += 1
+            self.on_gap(1)
+            return {"frame_id": frame_id, "chain_step": float(np.median(self.steps)) if self.steps else 0.0,
+                    "chain_pos": self.s or 0.0, "match_quality": self.quals[-1] if self.quals else 0.0,
+                    "chain_status": self.chain_status()}, True
+        self.last_jpeg = jpeg
         img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
         if img is None or img.size == 0:
             return None, False
@@ -255,6 +272,15 @@ class Cam4Stream:
         if self.s is not None:
             self.s += step * n_missing
         self.counters["gap_frames_total"] += n_missing
+
+    def arrival(self):
+        """(frames per second arriving, share of repeated pictures) over the latest frames; None early."""
+        a = list(self.arrivals)
+        if len(a) < 50:
+            return None
+        span = a[-1][0] - a[0][0]
+        fps = (len(a) - 1) / span if span > 0 else float("inf")
+        return fps, sum(r for _, r in a) / len(a)
 
     def chain_status(self):
         """0 moving, 1 weak view (low match quality), 2 stopped."""

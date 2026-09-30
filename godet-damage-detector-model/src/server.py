@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import queue
 import signal
 import sys
 import threading
@@ -354,17 +355,65 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
         out.append(tier1_cam4(pb2, req.frame_id, c4.version, d, c4.take_retained()))
 
     def Infer(self, request_iterator, context):
-        out = []
-        for req in request_iterator:
-            if not context.is_active():
-                break
+        """One worker thread per camera. The pipeline sends every camera on this one stream; handled in one
+        loop, the cameras shared one core: with 3 cameras each got ~5 of its 25 frames/s on the plant
+        server (2026-09-30), the NVR dropped the rest, ffmpeg repeated pictures and the model saw a
+        stopped chain. Responses are matched by frame_id on the pipeline side, so their order across
+        cameras does not matter; within a camera the worker keeps the order."""
+        outq = queue.Queue()
+        lanes = {}
+        STOP, LANE_DONE, READER_DONE = object(), object(), object()
+
+        def lane(q):
+            while True:
+                req = q.get()
+                if req is STOP:
+                    break
+                out = []
+                try:
+                    self._infer_one(req, out)
+                except Exception:
+                    LOG.exception("frame %s of %s failed", req.frame_id, req.camera_id)
+                for r in out:
+                    outq.put(r)
+            outq.put(LANE_DONE)
+
+        def reader():
+            try:
+                for req in request_iterator:
+                    if not context.is_active():
+                        break
+                    key = req.camera_id if req.camera_id in self.sideplate else "_legacy"
+                    q = lanes.get(key)
+                    if q is None:
+                        q = lanes[key] = queue.Queue()
+                        threading.Thread(target=lane, args=(q,), daemon=True, name=f"infer-{key}").start()
+                    q.put(req)
+            except Exception as e:                      # stream cancelled by the client
+                LOG.info("inference stream ended: %s", e)
+            finally:
+                for q in lanes.values():
+                    q.put(STOP)
+                outq.put(READER_DONE)
+
+        threading.Thread(target=reader, daemon=True, name="infer-reader").start()
+        n_lanes, done = None, 0
+        while n_lanes is None or done < n_lanes:
+            item = outq.get()
+            if item is READER_DONE:
+                n_lanes = len(lanes)
+            elif item is LANE_DONE:
+                done += 1
+            else:
+                yield item
+
+    def _infer_one(self, req, out):
+        """One request, in its camera's worker thread (responses appended to out)."""
+        if True:                                        # (kept at the old loop's indentation)
             if req.camera_id in self.sideplate:
                 # own lane: a side-plate camera's sequence_no never disturbs another camera
                 self.sideplate[req.camera_id].sequence(req, lambda r: self._release_cam4(r, out))
-                for r in out:
-                    yield r
-                out.clear()
-                continue
+                return
             seq = req.sequence_no
             if self.expected is not None and seq + REORDER_WINDOW < self.expected:
                 # sender restarted (new decoder / new operating window): count again
@@ -378,7 +427,7 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
                 self.expected = seq
             if seq < self.expected:
                 self._bump("late_frames_total")
-                continue
+                return
             if seq == self.expected:
                 self._release(req, out)
                 self.expected += 1
@@ -394,9 +443,6 @@ class RealServicer(pb2_grpc.InferenceServiceServicer):
                     while self.expected in self.hold:
                         self._release(self.hold.pop(self.expected), out)
                         self.expected += 1
-            for r in out:  # yield incrementally, keep latency low
-                yield r
-            out.clear()
             self._snapshot_periodic()
 
     def GetGodetState(self, request, context):

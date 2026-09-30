@@ -118,10 +118,25 @@ button,select,input{font:inherit;color:var(--text)}
 @media(max-width:1080px){.desk{grid-template-columns:210px 1fr}.canvas{display:none}.desk.focus .alarms{display:none}.desk.focus .canvas{display:block}}
 @media(prefers-reduced-motion:no-preference){.arow.flash{animation:rowin 1.2s}.toast{animation:rowin .25s}}
 @keyframes rowin{from{background:var(--rowsel)}}
+.cams{display:flex;flex-direction:column;gap:2px}
+.kinds{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--line2);border-radius:3px;overflow:hidden}
+.kinds button{background:var(--bg1);border:none;padding:7px 6px;cursor:pointer;color:var(--mut);font-size:13px;display:flex;justify-content:center;gap:6px}
+.kinds button+button{border-left:1px solid var(--line2)}
+.kinds button[aria-selected=true]{background:var(--steel);color:#fff;font-weight:600}
+.kinds button .cnt{font-family:var(--mono);font-size:12px;opacity:.8}
+.limits{border:1px solid var(--line);border-radius:3px;padding:10px;background:var(--bg0)}
+.limits .row{display:grid;grid-template-columns:1fr 58px;gap:8px;align-items:center;margin-bottom:8px;font-size:12px;color:var(--text)}
+.limits input{width:58px;text-align:center}
+.limits .hint{font-size:11px;color:var(--dim);margin:2px 0 8px}
+.limits .btn{width:100%;justify-content:center}
+.hiddenn{padding:6px 12px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
+.dtype{display:inline-block;margin-left:6px;padding:0 6px;border-radius:3px;font-size:11px;font-weight:650;letter-spacing:.04em;background:#F6E3E4;color:var(--red)}
+.dtype.wheel{background:#F5EBD9;color:var(--amber)}
+.explain{padding:9px 12px;font-size:13px;border-top:1px solid var(--line)}
 </style></head><body>
 <div class="cmdbar">
 <span class="app"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#e5484d" stroke-width="1.8"><path d="M9 2a5 5 0 0 1 5 5v3l1.4 2.6H2.6L4 10V7a5 5 0 0 1 5-5z"/><path d="M7 14.5a2 2 0 0 0 4 0"/></svg>CLINKER VISION</span>
-<span class="task">Alarm monitoring</span><span class="sp"></span>
+<span class="task" id="tasklabel">Alarm monitoring</span><span class="sp"></span>
 <span id="activebadge" class="badge clear"><span class="n" id="activen">0</span><span id="activet">CLEAR</span></span>
 <span id="syshealth" class="sys"><span class="dot"></span><span id="syslabel">Connecting</span><span class="mono" id="sysver"></span></span>
 <span class="clock" id="clock">--:--:--</span>
@@ -129,19 +144,32 @@ button,select,input{font:inherit;color:var(--text)}
 </div>
 <div class="desk" id="desk">
 <nav class="pane" aria-label="Alarm filters">
-<h3>Show</h3><div class="fgroup seg" role="tablist" aria-label="Alarm state filter">
+<h3>Camera</h3><div class="fgroup seg cams" id="cams" role="tablist" aria-label="Camera"></div>
+<h3>Report</h3><div class="fgroup kinds" role="tablist" aria-label="Godets or wheels">
+<button data-kind="godet" aria-selected="true">Godets<span class="cnt" id="cnt-godet"></span></button>
+<button data-kind="galet" aria-selected="false">Wheels<span class="cnt" id="cnt-galet"></span></button>
+</div>
+<h3>Show</h3><div class="fgroup seg" id="shows" role="tablist" aria-label="Alarm state filter">
 <button data-show="active" aria-selected="true">Active<span class="cnt" id="cnt-active"></span></button>
 <button data-show="acknowledged" aria-selected="false">Acknowledged<span class="cnt" id="cnt-acked"></span></button>
 <button data-show="all" aria-selected="false">All<span class="cnt" id="cnt-all"></span></button>
 </div>
-<div class="fgroup"><label for="camera">Camera</label>
-<select id="camera"><option value="">All cameras</option><option>CAM-1</option><option>CAM-2</option><option>CAM-3</option><option>CAM-4</option><option>CAM-5</option><option>CAM-6</option></select></div>
 <div class="fgroup"><label for="godet">Godet number</label>
 <input id="godet" type="search" placeholder="e.g. 812" autocomplete="off"></div>
+<div class="fgroup limits" id="limits" hidden>
+<h3 style="margin-top:0">Wheel alert limits</h3>
+<div class="row"><span>Maximum godets in a row without a wheel</span><input id="lim-max" type="number" min="2" max="20"></div>
+<div class="hint">Alert "too few wheels" above this number.</div>
+<div class="row"><span>Minimum spacing between two wheels (godets)</span><input id="lim-min" type="number" min="1" max="6"></div>
+<div class="hint">Alert "too many wheels" when two wheels are closer than this.</div>
+<button class="btn ack" id="lim-save">Save limits</button>
+<div class="hint" id="lim-note" style="margin-top:8px">Applies from the next chain loop (about 16 minutes). Alerts inside the limits are hidden.</div>
+</div>
 <p class="note" id="healthnote"></p>
 </nav>
 <section class="alarms" aria-label="Alarm list">
 <div class="listhead"><span id="listtitle">Active alarms</span><span class="sp"></span><span id="listcount"></span><button id="refresh">Refresh</button></div>
+<div id="hiddenn" class="hiddenn" hidden></div>
 <div class="rows" id="rows" role="listbox" aria-label="Alarms"></div>
 </section>
 <main class="canvas" id="canvas" aria-label="Selected alarm"></main>
@@ -150,85 +178,141 @@ button,select,input{font:inherit;color:var(--text)}
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
-const esc=v=>String(v==null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;","&gt;":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const store={items:new Map(),order:[],cursor:null,show:"active",camera:"",godet:"",selected:null,live:true,first:true};
+const esc=v=>String(v==null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const store={items:new Map(),show:"active",camera:null,kind:"godet",godet:"",selected:null,live:true,first:true,
+  limits:{wheel_max_gap_godets:4,wheel_min_spacing_godets:3},status:null};
 const fmtT=iso=>{try{return new Date(iso).toLocaleString(void 0,{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit"});}catch(e){return String(iso||"—");}};
 const fmtAge=iso=>{if(!iso)return "—";const s=Math.max(0,Math.round((Date.now()-new Date(iso).getTime())/1000));if(s<5)return "just now";if(s<60)return s+"s ago";const m=Math.floor(s/60);return m<60?m+"m ago":Math.floor(m/60)+"h ago";};
 function toast(msg,kind){const d=document.createElement("div");d.className="toast "+(kind||"");d.textContent=msg;$("toasts").appendChild(d);setTimeout(()=>d.remove(),6500);}
 function sevOf(a){if(a.seen_at)return "acked";return (a.state==="confirmed")?"critical":"major";}
+/* ---- what an alarm is, in plain words ---- */
+function meas(a){if(a._m===void 0){try{a._m=JSON.parse(a.measurements_json||"null")||{};}catch(e){a._m={};}}return a._m;}
+const isWheel=a=>a.observation_target==="galet";
+const DTYPE={1:"Cut",2:"Out of line",3:"Cut + out of line"};
+function num(v){return v==null||v===""?null:Math.round(Number(v));}
+function label(a){const m=meas(a);
+if(isWheel(a)){if(a.fault_type==="WHEEL_GAP")return "Too few wheels";if(a.fault_type==="WHEEL_DENSITY")return "Too many wheels";if(a.fault_type==="WHEEL_MISSING")return "Wheel missing";return a.fault_type;}
+if(m.damage_type!=null)return DTYPE[num(m.damage_type)]||"Damage";
+if(m.lip!=null)return "Lip damage";return "Side-plate fault";}
+function place(a){const m=meas(a);if(isWheel(a)){const f=num(m.first_godet),l=num(m.last_godet);
+if(f!=null&&l!=null&&f!==l)return "Godets "+f+"–"+l;return "Godet "+(f!=null?f:(a.godet_id||"—"));}
+return "Godet #"+(a.godet_id||"—");}
+function summary(a){const m=meas(a),L=store.limits;
+if(a.fault_type==="WHEEL_GAP")return num(m.godets)+" godets in a row without a wheel (limit: at most "+L.wheel_max_gap_godets+")";
+if(a.fault_type==="WHEEL_DENSITY")return num(m.wheels)+" wheels within "+num(m.godets)+" godets"+(m.min_spacing!=null?"; the closest two are "+num(m.min_spacing)+" godet"+(num(m.min_spacing)===1?"":"s")+" apart (limit: at least "+L.wheel_min_spacing_godets+")":"");
+if(a.fault_type==="WHEEL_MISSING")return "A wheel seen on earlier chain loops is absent on the 2 latest loops.";
+if(m.damage_type!=null)return "The godet's outside (side plate / lower part) is "+String(DTYPE[num(m.damage_type)]||"damaged").toLowerCase()+".";
+return "";}
+/* wheel alarms that no longer break the limits set on this page are hidden */
+function inLimits(a){if(!isWheel(a))return false;const m=meas(a),L=store.limits;
+if(a.fault_type==="WHEEL_GAP")return num(m.godets)!=null&&num(m.godets)<=L.wheel_max_gap_godets;
+if(a.fault_type==="WHEEL_DENSITY")return m.min_spacing!=null&&num(m.min_spacing)>=L.wheel_min_spacing_godets;
+return false;}
 /* ---- clock ---- */
 function tickClock(){const d=new Date();$("clock").textContent=[d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,"0")).join(":");}
 tickClock();setInterval(tickClock,1000);
+/* ---- cameras ---- */
+function cameras(){const s=new Set();const st=store.status;if(st&&st.cameras)st.cameras.forEach(c=>{if(c.camera_id)s.add(c.camera_id);});else if(st&&st.camera_id)s.add(st.camera_id);
+for(const a of store.items.values())s.add(a.camera_id);return Array.from(s).sort();}
+function camStatus(id){const st=store.status;if(!st)return null;if(st.cameras){return st.cameras.find(c=>c.camera_id===id)||null;}return st.camera_id===id?st:null;}
+function renderCams(){const list=cameras();if(list.length&&(!store.camera||list.indexOf(store.camera)<0)){
+let best=null;for(const c of list){if(activeCount(c,null)>0){best=c;break;}}store.camera=best||list[0]||null;}
+$("cams").innerHTML=list.length?list.map(c=>{const n=activeCount(c,null),cs=camStatus(c);
+const st=cs?String(cs.status||"").replace(/_/g," "):"";
+return '<button data-cam="'+esc(c)+'" aria-selected="'+(c===store.camera)+'"><span>'+esc(c)+(st?' <span style="color:var(--dim);font-size:11px">'+esc(st)+'</span>':'')+'</span><span class="cnt">'+(n||"")+'</span></button>';}).join(""):'<div class="note">No camera yet.</div>';
+$("cams").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{store.camera=b.getAttribute("data-cam");store.selected=null;renderAll();}));
+$("tasklabel").textContent=store.camera?store.camera+" — "+(store.kind==="galet"?"Wheels":"Godets"):"Alarm monitoring";}
 /* ---- system health ---- */
-async function pollStatus(){try{const r=await fetch("/api/v1/status");if(!r.ok)throw new Error("HTTP "+r.status);const st=await r.json();
+async function pollStatus(){try{const r=await fetch("/api/v1/status");if(!r.ok)throw new Error("HTTP "+r.status);const st=await r.json();store.status=st;
 const sys=$("syshealth");sys.className="sys "+(!st.last_poll_at?"":!st.ready?(st.status==="template_lost"?"bad":"warn"):(st.status==="ok"?"ok":"warn"));
 $("syslabel").textContent=!st.last_poll_at?"Starting":!st.ready?(st.status||"not ready").replace(/_/g," "):(st.status==="ok"?"Running":"Running — "+String(st.status).replace(/_/g," "));
-$("sysver").textContent=st.model_version||"";
-const det=[];det.push(st.loop_locked?"Loop locked":"Loop open");if(st.last_poll_at)det.push("poll "+fmtAge(st.last_poll_at));
-if(st.counters&&st.counters.frames_total!=null)det.push(Number(st.counters.frames_total).toLocaleString("en-US")+" frames");
-let cams="";if(st.cameras&&st.cameras.length>1){cams=st.cameras.map(c=>c.camera_id+": "+String(c.status||"").replace(/_/g," ")+(c.counters&&c.counters.frames_total!=null&&c.status!=="standby"?" ("+Number(c.counters.frames_total).toLocaleString("en-US")+" frames)":"")).join(" | ")+". ";}
-$("healthnote").textContent=cams+(st.camera_id?st.camera_id+": ":"")+det.join(" · ")+(st.detail?". "+st.detail:"")+(st.last_error?". Last poll error: "+st.last_error:"");
+$("sysver").textContent=st.model_version||"";renderCams();renderHealth();
 }catch(e){$("syshealth").className="sys bad";$("syslabel").textContent="Unreachable";$("healthnote").textContent=String(e.message||e);}}
+function renderHealth(){const c=store.camera&&camStatus(store.camera);if(!c){$("healthnote").textContent="";return;}
+const n=c.counters&&c.counters.frames_total!=null?Number(c.counters.frames_total).toLocaleString("en-US")+" frames":"";
+$("healthnote").textContent=c.camera_id+": "+String(c.status||"").replace(/_/g," ")+(n?" · "+n:"")+(c.detail?". "+c.detail:"")+(c.last_error?". Last error: "+c.last_error:"");}
 /* ---- alarm list ---- */
-function visible(){const out=[];for(const id of store.order){const a=store.items.get(id);if(!a)continue;
-if(store.show==="active"&&a.seen_at)continue;if(store.show==="acknowledged"&&!a.seen_at)continue;
-if(store.camera&&a.camera_id!==store.camera)continue;
-if(store.godet&&String(a.godet_id||"").indexOf(store.godet)<0)continue;out.push(a);}return out;}
-function counts(){let act=0,ack=0;for(const a of store.items.values()){if(store.camera&&a.camera_id!==store.camera)continue;
-if(store.godet&&String(a.godet_id||"").indexOf(store.godet)<0)continue;if(a.seen_at)ack++;else act++;}
+function matches(a,cam,kind){if(cam&&a.camera_id!==cam)return false;if(kind&&(isWheel(a)?"galet":"godet")!==kind)return false;
+if(inLimits(a))return false;if(store.godet&&String(a.godet_id||"").indexOf(store.godet)<0)return false;return true;}
+function activeCount(cam,kind){let n=0;for(const a of store.items.values())if(!a.seen_at&&matches(a,cam,kind))n++;return n;}
+function visible(){const out=[];for(const a of store.items.values()){if(!matches(a,store.camera,store.kind))continue;
+if(store.show==="active"&&a.seen_at)continue;if(store.show==="acknowledged"&&!a.seen_at)continue;out.push(a);}
+out.sort((x,y)=>new Date(y.detected_at)-new Date(x.detected_at));return out;}
+function counts(){let act=0,ack=0;for(const a of store.items.values()){if(!matches(a,store.camera,store.kind))continue;if(a.seen_at)ack++;else act++;}
 $("cnt-active").textContent=act||"";$("cnt-acked").textContent=ack||"";$("cnt-all").textContent=(act+ack)||"";
-const b=$("activebadge");$("activen").textContent=act;$("activet").textContent=act?"ACTIVE":"CLEAR";b.className="badge "+(act?"alarm":"clear");}
-async function load(append){try{const q=new URLSearchParams();if(store.camera)q.set("camera_id",store.camera);q.set("limit","50");if(append&&store.cursor)q.set("cursor",store.cursor);
-const r=await fetch("/api/v1/alerts?"+q);if(!r.ok)throw new Error("HTTP "+r.status);const d=await r.json();let fresh=0;
-for(const a of d.items||[]){if(!store.items.has(a.alert_id)&&!append&&!store.first)fresh++;store.items.set(a.alert_id,a);if(store.order.indexOf(a.alert_id)<0)store.order.push(a.alert_id);}
-store.order.sort((x,y)=>new Date(store.items.get(y).detected_at)-new Date(store.items.get(x).detected_at));
-store.cursor=d.next_cursor||null;store.first=false;
-if(!store.selected||!store.items.has(store.selected)){const v=visible();store.selected=v.length?v[0].alert_id:null;}
-renderList();renderCanvas();counts();
-$("listcount").textContent=visible().length+" shown";
-if(fresh>0)toast(fresh+" new alarm"+(fresh===1?"":"s"),"new");
+$("cnt-godet").textContent=activeCount(store.camera,"godet")||"";$("cnt-galet").textContent=activeCount(store.camera,"galet")||"";
+let all=0;for(const a of store.items.values())if(!a.seen_at&&!inLimits(a))all++;
+const b=$("activebadge");$("activen").textContent=all;$("activet").textContent=all?"ACTIVE":"CLEAR";b.className="badge "+(all?"alarm":"clear");
+let hid=0;if(store.kind==="galet")for(const a of store.items.values())if(a.camera_id===store.camera&&inLimits(a))hid++;
+$("hiddenn").hidden=!hid;$("hiddenn").textContent=hid+" wheel alarm"+(hid===1?"":"s")+" hidden: inside the limits set on this page.";}
+async function fetchPage(cursor,limit){const q=new URLSearchParams();q.set("limit",String(limit));if(cursor)q.set("cursor",cursor);
+const r=await fetch("/api/v1/alerts?"+q);if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
+async function load(full){try{let fresh=0,cursor=null,pages=0;
+do{const d=await fetchPage(cursor,full?200:50);for(const a of d.items||[]){const old=store.items.get(a.alert_id);
+if(!old&&!store.first)fresh++;store.items.set(a.alert_id,a);}cursor=d.next_cursor||null;pages++;}while(full&&cursor&&pages<10);
+store.first=false;renderAll();if(fresh>0)toast(fresh+" new alarm"+(fresh===1?"":"s"),"new");
 }catch(e){toast("Alarm list: "+(e.message||e),"error");}}
+function saveHash(){try{history.replaceState(null,"","#cam="+encodeURIComponent(store.camera||"")+"&view="+(store.kind==="galet"?"wheels":"godets"));}catch(e){}}
+(function readHash(){const h=new URLSearchParams(location.hash.slice(1));if(h.get("cam"))store.camera=h.get("cam");if(h.get("view")==="wheels")store.kind="galet";})();
+function renderAll(){renderCams();counts();renderHealth();saveHash();
+document.querySelectorAll(".kinds button").forEach(x=>x.setAttribute("aria-selected",String(x.getAttribute("data-kind")===store.kind)));
+$("limits").hidden=store.kind!=="galet";
+const v=visible();if(!store.selected||!v.some(a=>a.alert_id===store.selected))store.selected=v.length?v[0].alert_id:null;
+renderList();renderCanvas();$("listcount").textContent=v.length+" shown";}
 function renderList(){const rows=$("rows"),vis=visible();
-$("listtitle").textContent=store.show==="active"?"Active alarms":store.show==="acknowledged"?"Acknowledged alarms":"All alarms";
+$("listtitle").textContent=(store.show==="active"?"Active":store.show==="acknowledged"?"Acknowledged":"All")+" — "+(store.kind==="galet"?"wheels":"godets");
 if(!vis.length){rows.innerHTML='<div class="norows"><svg width="30" height="30" viewBox="0 0 30 30" fill="none" stroke="#4a525c" stroke-width="1.6"><circle cx="15" cy="15" r="9"/><path d="M15 9v6l4 2"/></svg><div>No alarms in this view.</div></div>';return;}
 rows.innerHTML=vis.map(a=>{const sev=sevOf(a),acked=!!a.seen_at;
 return '<button class="arow sev-'+sev+(acked?" st-acked":" st-active")+'" role="option" aria-selected="'+(a.alert_id===store.selected)+'" data-id="'+esc(a.alert_id)+'">'
-+'<span class="sev"></span><span class="body"><span class="l1"><span class="src">Godet #'+esc(a.godet_id||"—")+'</span><span class="inst">LOOP '+esc(a.loop_no||"—")+' · '+esc(a.camera_id)+'</span></span>'
-+'<span class="l2"><span>'+esc((a.state||"event").toUpperCase())+' · '+esc(a.fault_type)+'</span><span class="mono">'+esc(fmtT(a.detected_at))+'</span></span></span>'
++'<span class="sev"></span><span class="body"><span class="l1"><span class="src">'+esc(place(a))+'</span><span class="dtype'+(isWheel(a)?" wheel":"")+'">'+esc(label(a))+'</span></span>'
++'<span class="l2"><span>'+esc(isWheel(a)?summary(a):"Loop "+(a.loop_no||"—"))+'</span><span class="mono">'+esc(fmtT(a.detected_at))+'</span></span></span>'
 +'<span class="st">'+(acked?"Acked":"Active")+'</span></button>';}).join("");
 rows.querySelectorAll(".arow").forEach(b=>b.addEventListener("click",()=>{store.selected=b.getAttribute("data-id");renderList();renderCanvas();if(window.innerWidth<=1080)$("desk").classList.add("focus");}));}
 /* ---- canvas tile + details ---- */
-function measurements(a){try{const m=JSON.parse(a.measurements_json||"null");if(!m||typeof m!=="object")return null;
-return [["Lip before",m.lip_before],["Lip now",m.lip_now],["Drop",m.drop]].filter(x=>x[1]!==void 0&&x[1]!==null);}catch(e){return null;}}
+function details(a){const m=meas(a),rows=[];const f=(k,v)=>{if(v!==void 0&&v!==null&&v!=="")rows.push([k,v]);};
+if(isWheel(a)){f("Problem",label(a));f("First godet",num(m.first_godet));f("Last godet",num(m.last_godet));f("Godets",num(m.godets));f("Wheels",num(m.wheels));
+if(m.min_spacing!=null)f("Closest two wheels (godets apart)",num(m.min_spacing));}
+else if(m.damage_type!=null){f("Damage type",DTYPE[num(m.damage_type)]);f("Cut (model, 0–1)",m.cut!=null?Number(m.cut).toFixed(2):null);
+f("Out of line (model, 0–1)",m.out_of_line!=null?Number(m.out_of_line).toFixed(2):null);f("Score",m.severity!=null?Number(m.severity).toFixed(2):null);f("Chain loops seen",num(m.passes_seen));}
+else if(m.lip!=null){f("Lip",m.lip);f("Near plate",String(m.near_plate));}
+else{f("Severity",m.severity!=null?Number(m.severity).toFixed(2):null);f("Chain loops seen",num(m.passes_seen));}
+return rows;}
 function renderCanvas(){const c=$("canvas"),a=store.items.get(store.selected);
 if(!a){c.innerHTML='<div class="empty-canvas">Select an alarm from the list to inspect its evidence and details.</div>';return;}
-const sev=sevOf(a),ms=measurements(a);
-c.innerHTML='<div class="tile"><div class="overlay '+(sev==="acked"?"":sev)+'"><span class="aname">'+esc(a.fault_type)+' — Godet #'+esc(a.godet_id||"—")+'</span>'
+const sev=sevOf(a),m=meas(a),rows=details(a),legacy=m.lip!=null;
+c.innerHTML='<div class="tile"><div class="overlay '+(sev==="acked"?"":sev)+'"><span class="aname">'+esc(label(a))+' — '+esc(place(a))+'</span>'
 +'<span class="asrc">'+esc(a.camera_id)+' · Loop '+esc(a.loop_no||"—")+' · '+(a.state||"event").toUpperCase()+'</span><span class="sp"></span><span class="ats">'+esc(fmtT(a.detected_at))+'</span></div>'
-+'<a href="'+esc(a.evidence_url)+'"><img src="'+esc(a.evidence_url)+'" alt="Evidence frame, godet '+esc(a.godet_id||"")+'"></a>'
++'<a href="'+esc(a.evidence_url)+'"><img src="'+esc(a.evidence_url)+'" alt="Evidence, '+esc(place(a))+'"></a>'
 +'<div class="cmdbar2">'+(a.seen_at?'<span style="color:var(--mut);font-size:13px">Acknowledged '+esc(fmtT(a.seen_at))+'</span>':'<button class="btn ack" id="ackbtn"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 7.5l3.2 3L12 3.5"/></svg>Acknowledge</button>')
 +'<button class="btn ghost" id="fullbtn">Open full image</button><span class="meta">'+esc(a.alert_id.slice(0,8))+' · '+esc(a.model_version)+'</span></div></div>'
-+'<div class="detail"><h3>Alarm details</h3><div class="dgrid">'
-+'<div><div class="k">Event key</div><div class="v">'+esc(a.event_key||(a.godet_id!=null?("DAMAGE:"+a.godet_id+":"+a.loop_no):"—"))+'</div></div>'
-+'<div><div class="k">Rule</div><div class="v">'+esc(a.rule_id||"—")+'</div></div>'
-+'<div><div class="k">Evidence frame</div><div class="v">'+esc((a.evidence_frame_id||"").slice(0,13)||"—")+'</div></div>'
-+'</div>'
-+'<div style="padding:8px 12px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)">Detection: <span style="color:var(--text)">fixed ROI indicator, full frame</span> — marks the inspected region, not localized damage.</div>'
-+(ms?'<h3>Lip measurements (rows)</h3><table class="mtable"><tr><th>Signal</th><th>Value</th></tr>'+ms.map(x=>'<tr><td>'+esc(x[0])+'</td><td>'+esc(x[1])+'</td></tr>').join("")+'</table>':"")
++'<div class="detail"><h3>What was found</h3>'
++(summary(a)?'<div class="explain">'+esc(summary(a))+'</div>':'')
++(m.evidence==="latest_frame"?'<div class="explain" style="color:var(--amber)">Picture: the live view at the time of the alert (the picture of the fault was no longer available).</div>':'')
++(isWheel(a)?'<div class="explain" style="color:var(--mut)">Picture: the unrolled chain around the place; the box marks the godets concerned.</div>':
+ legacy?'<div class="explain" style="color:var(--mut)">Box: fixed inspection region of the old Camera 1 view, not the damage itself.</div>':
+ '<div class="explain" style="color:var(--mut)">Box: the plate the model judged.</div>')
++(rows.length?'<table class="mtable"><tr><th>Measurement</th><th>Value</th></tr>'+rows.map(x=>'<tr><td style="font-family:inherit">'+esc(x[0])+'</td><td>'+esc(x[1])+'</td></tr>').join("")+'</table>':'')
 +'<h3>Timeline</h3><div class="timeline">'
 +'<div class="tl done"><div class="rail"><span class="pt"></span><span class="ln"></span></div><div class="tx">Triggered <span class="t">'+esc(fmtT(a.detected_at))+'</span></div></div>'
 +'<div class="tl '+(a.seen_at?"done":"")+'"><div class="rail"><span class="pt"></span><span class="ln"></span></div><div class="tx">'+(a.seen_at?('Acknowledged <span class="t">'+esc(fmtT(a.seen_at))+'</span>'):"Awaiting acknowledgment")+'</div></div>'
 +'</div></div>'
-+'<p class="foot">Bounding box shown is the fixed compatibility ROI, identical on every detection.</p>';
++'<p class="foot">Event '+esc(a.event_key||"—")+' · evidence frame '+esc((a.evidence_frame_id||"").slice(0,13)||"—")+'</p>';
 const ack=$("ackbtn");if(ack)ack.addEventListener("click",()=>acknowledge(a.alert_id,ack));
 $("fullbtn").addEventListener("click",()=>window.open(a.evidence_url,"_blank"));}
 async function acknowledge(id,btn){btn.disabled=true;try{const r=await fetch("/api/v1/alerts/"+encodeURIComponent(id)+"/seen",{method:"POST"});if(!r.ok)throw new Error("HTTP "+r.status);
-const d=await r.json(),a=store.items.get(id);if(a)a.seen_at=d.seen_at;renderList();renderCanvas();counts();toast("Alarm acknowledged.");}catch(e){btn.disabled=false;toast("Acknowledge failed: "+(e.message||e),"error");}}
+const d=await r.json(),a=store.items.get(id);if(a)a.seen_at=d.seen_at;renderAll();toast("Alarm acknowledged.");}catch(e){btn.disabled=false;toast("Acknowledge failed: "+(e.message||e),"error");}}
+/* ---- wheel limits ---- */
+async function loadLimits(){try{const r=await fetch("/api/v1/settings");if(!r.ok)return;store.limits=await r.json();
+$("lim-max").value=store.limits.wheel_max_gap_godets;$("lim-min").value=store.limits.wheel_min_spacing_godets;renderAll();}catch(e){}}
+$("lim-save").addEventListener("click",async()=>{const body={wheel_max_gap_godets:Number($("lim-max").value),wheel_min_spacing_godets:Number($("lim-min").value)};
+try{const r=await fetch("/api/v1/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const d=await r.json();if(!r.ok)throw new Error(d.error||d.message||("HTTP "+r.status));store.limits=d;renderAll();
+toast("Limits saved: the model uses them from the next chain loop (about 16 minutes).");}catch(e){toast("Limits not saved: "+(e.message||e),"error");}});
 /* ---- controls ---- */
-document.querySelectorAll(".seg button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".seg button").forEach(x=>x.setAttribute("aria-selected","false"));b.setAttribute("aria-selected","true");store.show=b.getAttribute("data-show");store.cursor=null;load(false);}));
-$("camera").addEventListener("change",e=>{store.camera=e.target.value;store.cursor=null;load(false);});
-let gT=null;$("godet").addEventListener("input",e=>{clearTimeout(gT);gT=setTimeout(()=>{store.godet=e.target.value.trim();renderList();counts();},160);});
-$("refresh").addEventListener("click",()=>load(false));
+document.querySelectorAll("#shows button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("#shows button").forEach(x=>x.setAttribute("aria-selected","false"));b.setAttribute("aria-selected","true");store.show=b.getAttribute("data-show");store.selected=null;renderAll();}));
+document.querySelectorAll(".kinds button").forEach(b=>b.addEventListener("click",()=>{store.kind=b.getAttribute("data-kind");store.selected=null;renderAll();}));
+let gT=null;$("godet").addEventListener("input",e=>{clearTimeout(gT);gT=setTimeout(()=>{store.godet=e.target.value.trim();renderAll();},160);});
+$("refresh").addEventListener("click",()=>{load(true);pollStatus();});
 $("livebtn").addEventListener("click",()=>{store.live=!store.live;$("livebtn").setAttribute("aria-pressed",String(store.live));arm();});
 document.addEventListener("keydown",e=>{if(e.target.matches("input,select"))return;const vis=visible();if(!vis.length)return;
 let i=vis.findIndex(a=>a.alert_id===store.selected);
@@ -236,7 +320,7 @@ if(e.key==="ArrowDown"){store.selected=vis[Math.min(vis.length-1,i+1)].alert_id;
 else if(e.key==="ArrowUp"){store.selected=vis[Math.max(0,i-1)].alert_id;renderList();renderCanvas();e.preventDefault();}});
 let t1=null;function arm(){clearInterval(t1);if(store.live)t1=setInterval(()=>{if(!document.hidden){load(false);pollStatus();}},5000);}
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&store.live){load(false);pollStatus();}});
-pollStatus();load(false);arm();setInterval(pollStatus,7000);
+pollStatus();loadLimits();load(true);arm();setInterval(()=>load(true),120000);
 </script></body></html>`
 
 func serveIndex(w http.ResponseWriter, r *http.Request) {

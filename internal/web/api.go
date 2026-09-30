@@ -23,6 +23,9 @@ type API struct {
 	Store        *store.Store
 	EvidenceRoot string
 	Now          func() time.Time
+	// SettingsPath is the settings file shared with the model (wheel alert limits); empty = no settings API.
+	SettingsPath string
+	settingsMu   sync.Mutex
 }
 
 func NewAPI(alertStore *store.Store, evidenceRoot string) *API {
@@ -250,6 +253,7 @@ func (a *API) ListAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := a.Store.ListAlerts(r.Context(), store.ListFilter{
 		CameraID: query.Get("camera_id"), FaultType: strings.ToUpper(query.Get("fault_type")),
+		Target: strings.ToLower(query.Get("target")),
 		UnseenOnly: unseenOnly, Since: since, BeforeDetectedAt: beforeDetectedAt,
 		BeforeAlertID: beforeAlertID, Limit: limit,
 	})

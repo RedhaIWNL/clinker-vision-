@@ -55,55 +55,66 @@ func main() {
 	defer alertStore.Close()
 
 	now := time.Now().UTC()
-	seeds := []seed{
-		{godet: 812, loop: 41, state: "confirmed", seen: false, mins: 6},
-		{godet: 812, loop: 40, state: "confirmed", seen: true, mins: 38},
-		{godet: 207, loop: 41, state: "pending", seen: false, mins: 11},
-		{godet: 1150, loop: 41, state: "pending", seen: false, mins: 17},
-		{godet: 44, loop: 40, state: "confirmed", seen: false, mins: 52},
-		{godet: 963, loop: 40, state: "pending", seen: true, mins: 71},
-		{godet: 531, loop: 39, state: "confirmed", seen: true, mins: 96},
-		{godet: 388, loop: 39, state: "pending", seen: false, mins: 121},
+	type demo struct {
+		cam, target, fault string
+		godet, loop        int32
+		seen               bool
+		mins               int
+		box                store.BoundingBox
+		meas               string
 	}
-	for _, s := range seeds {
+	plate := store.BoundingBox{X: 0.49, Y: 0.64, Width: 0.1, Height: 0.2}
+	strip := store.BoundingBox{X: 0.3, Y: 0, Width: 0.4, Height: 1}
+	demos := []demo{
+		{"CAM-1", "godet", "DAMAGE", 44, 12, false, 4, plate, `{"damage_type":3,"cut":0.93,"out_of_line":0.88,"severity":0.97,"passes_seen":4}`},
+		{"CAM-1", "godet", "DAMAGE", 86, 12, false, 9, plate, `{"damage_type":1,"cut":0.96,"out_of_line":0.12,"severity":0.91,"passes_seen":3}`},
+		{"CAM-1", "godet", "DAMAGE", 87, 11, true, 60, plate, `{"damage_type":2,"cut":0.20,"out_of_line":0.94,"severity":0.88,"passes_seen":5}`},
+		{"CAM-1", "galet", "WHEEL_GAP", 216, 12, false, 14, strip, `{"first_godet":216,"last_godet":221,"godets":6,"wheels":0}`},
+		{"CAM-1", "galet", "WHEEL_DENSITY", 299, 12, false, 15, strip, `{"first_godet":299,"last_godet":302,"godets":4,"wheels":3,"min_spacing":1}`},
+		{"CAM-1", "galet", "WHEEL_MISSING", 1055, 12, false, 16, strip, `{"first_godet":1055,"last_godet":1055,"godets":1,"wheels":0}`},
+		{"CAM-1", "galet", "WHEEL_GAP", 564, 11, false, 40, strip, `{"first_godet":564,"last_godet":567,"godets":4,"wheels":0}`},
+		{"CAM-3", "galet", "WHEEL_DENSITY", 195, 8, false, 30, strip, `{"first_godet":195,"last_godet":199,"godets":5,"wheels":3,"min_spacing":2}`},
+		{"CAM-4", "godet", "DAMAGE", 227, 3, false, 25, store.BoundingBox{X: 0.55, Y: 0.35, Width: 0.12, Height: 0.2}, `{"severity":2.4,"passes_seen":3}`},
+	}
+	for _, d := range demos {
 		alertID := uuid.NewString()
-		detected := now.Add(-time.Duration(s.mins) * time.Minute)
-		ref := fmt.Sprintf("2026/09/21/CAM-1/%s.jpg", alertID)
-		if err := evidence.WriteAtomic(evidenceRoot, ref, mockJPEG(s.godet, s.state)); err != nil {
+		detected := now.Add(-time.Duration(d.mins) * time.Minute)
+		ref := fmt.Sprintf("2026/09/30/%s/%s.jpg", d.cam, alertID)
+		if err := evidence.WriteAtomic(evidenceRoot, ref, mockJPEG(d.godet, "confirmed")); err != nil {
 			logger.Error("evidence seed failed", "reason", err)
 			os.Exit(1)
 		}
 		var seenAt *time.Time
-		if s.seen {
+		if d.seen {
 			at := detected.Add(9 * time.Minute)
 			seenAt = &at
 		}
 		alert := store.Alert{
 			AlertID: alertID, CapturedAt: detected, DetectedAt: detected, CreatedAt: detected,
-			CameraID: "CAM-1", ObservationTarget: "godet", FaultType: "DAMAGE",
-			FrameID:          uuid.NewString(),
-			ModelVersion:     "498184ea+preview+thr-v1",
-			BoundingBox:      store.BoundingBox{X: 0.3806, Y: 0.1158, Width: 0.0536, Height: 0.1697},
-			EvidenceRef:      ref,
-			SeenAt:           seenAt,
-			GodetID:          s.godet,
-			AlertState:       s.state,
-			LoopNo:           s.loop,
-			RuleID:           "short-lip",
-			EventKey:         fmt.Sprintf("DAMAGE:%d:%d", s.godet, s.loop),
-			EvidenceFrameID:  uuid.NewString(),
-			MeasurementsJSON: fmt.Sprintf(`{"lip_before":150.0,"lip_now":%.1f,"drop":%.1f}`, 150.0-float64(s.godet%37), float64(s.godet%37)),
+			CameraID: d.cam, ObservationTarget: d.target, FaultType: d.fault,
+			FrameID: uuid.NewString(), ModelVersion: "2319148e+preview+c1n-20260929",
+			BoundingBox: d.box, EvidenceRef: ref, SeenAt: seenAt, GodetID: d.godet, AlertState: "confirmed",
+			LoopNo: d.loop, RuleID: d.fault, EventKey: fmt.Sprintf("%s:%s:%d:%d", d.cam, d.fault, d.godet, d.loop),
+			EvidenceFrameID: uuid.NewString(), MeasurementsJSON: d.meas,
 		}
 		if err := alertStore.InsertAlert(ctx, alert); err != nil {
 			logger.Error("seed failed", "reason", err)
 			os.Exit(1)
 		}
 	}
+	seeds := demos
 
 	healthHandler := health.New()
 	healthHandler.SetReady(true)
 	status := web.NewStatusStore()
 	polled := now
+	for _, c := range []struct{ id, st, detail string }{{"CAM-1", "ok", "all clear"}, {"CAM-3", "standby", "outside operating window 09:00-12:30"}, {"CAM-4", "standby", "outside operating window 12:30-16:00"}} {
+		c := c
+		status.UpdateCamera(c.id, func(s *web.ModelStatus) {
+			s.Status, s.Detail, s.Ready, s.LoopLocked = c.st, c.detail, c.st == "ok", c.st == "ok"
+			s.Counters = map[string]float64{"frames_total": 184023}
+		})
+	}
 	status.Update(func(s *web.ModelStatus) {
 		s.Ready = true
 		s.LoopLocked = true
@@ -117,9 +128,11 @@ func main() {
 		}
 	})
 
+	api := web.NewAPI(alertStore, evidenceRoot)
+	api.SettingsPath = filepath.Join(root, "settings.json")
 	server := &http.Server{
 		Addr:              "127.0.0.1:8080",
-		Handler:           web.NewHandler(healthHandler, metrics.New(), web.NewAPI(alertStore, evidenceRoot), status),
+		Handler:           web.NewHandler(healthHandler, metrics.New(), api, status),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

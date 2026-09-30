@@ -195,3 +195,27 @@ def test_no_flag_is_raised_before_three_passes():
     assert flags(t) == {} and t.counters["wheel_evaluations_total"] == 0
     feed(t, b, loops=1, first_loop=2)
     assert [x[:2] for x in flags(t)["wheel_gap"]] == [(101, 107)]
+
+
+def test_limits_from_the_web_page_change_the_alerts(tmp_path, monkeypatch):
+    """The operator sets the limits in the web page (settings.json, read at each evaluation). The
+    planted gap is 7 godets without a wheel (101-107); the planted pair is 1 godet apart (300, 301)."""
+    import json
+    from src.cam4 import wheels as W
+    s = tmp_path / "settings.json"
+    monkeypatch.setattr(W, "SETTINGS", str(s))
+    s.write_text(json.dumps({"wheel_max_gap_godets": 7, "wheel_min_spacing_godets": 1}))
+    b, t = make()
+    feed(t, b, loops=3)
+    f = flags(t)
+    assert "wheel_gap" not in f, f.get("wheel_gap")            # 7 godets allowed: no alert
+    assert "wheel_density" not in f, f.get("wheel_density")    # 1 godet apart allowed
+    s.write_text(json.dumps({"wheel_max_gap_godets": 6, "wheel_min_spacing_godets": 2}))
+    b, t = make()
+    feed(t, b, loops=3)
+    f = flags(t)
+    assert [x[:2] for x in f.get("wheel_gap", [])] == [(101, 107)]
+    assert f.get("wheel_density")
+    r = pb2.GodetStateResponse(); t.events(r)
+    dens = [e for e in r.events if e.kind == "wheel_density"]
+    assert dens and dens[0].measurements["min_spacing"] == 1.0

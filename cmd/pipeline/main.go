@@ -834,9 +834,12 @@ func main() {
 	}
 	defer modelClient.Close()
 	statusStore := web.NewStatusStore()
+	webAPI := web.NewAPI(alertStore, cfg.Storage.EvidencePath)
+	// next to the alerts database: the model reads it through the shared data folder (docker-compose.yml)
+	webAPI.SettingsPath = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "settings.json")
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Server.BindAddress, cfg.Server.WebPort),
-		Handler:           web.NewHandler(healthHandler, metricHandler, web.NewAPI(alertStore, cfg.Storage.EvidencePath), statusStore),
+		Handler:           web.NewHandler(healthHandler, metricHandler, webAPI, statusStore),
 		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 

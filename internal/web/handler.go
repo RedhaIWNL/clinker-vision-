@@ -19,6 +19,8 @@ func NewHandler(healthHandler *health.Handler, metricHandler *metrics.Metrics, a
 		mux.HandleFunc("GET /api/v1/alerts/{alert_id}", api.GetAlert)
 		mux.HandleFunc("GET /api/v1/alerts/{alert_id}/evidence", api.ServeEvidence)
 		mux.HandleFunc("POST /api/v1/alerts/{alert_id}/seen", api.MarkSeen)
+		mux.HandleFunc("GET /api/v1/settings", api.GetSettings)
+		mux.HandleFunc("PUT /api/v1/settings", api.PutSettings)
 	}
 	return mux
 }
