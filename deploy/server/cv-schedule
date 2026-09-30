@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# One camera at a time: set each camera's hours so they never overlap, then restart the pipeline.
+#   sudo bash deploy/server/cv-schedule
+# The plant server (6 cores, Xeon E5-2620 v3) cannot run three cameras at 25 frames/s at once
+# (2026-09-30: each got ~5 frames/s and read the chain as stopped). CAM-1 and CAM-4 see the same side
+# of the chain, CAM-3 the other one. Hours chosen for the light each camera was tuned on:
+WINDOWS="CAM-3=09:00-12:30 CAM-4=12:30-16:00 CAM-1=16:00-09:00"
+
+set -u
+[ "$(id -u)" = 0 ] || exec sudo bash "$0" "$@"
+DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$DIR" || exit 1
+[ -f config/config.yaml ] || { echo "config/config.yaml not found in $DIR"; exit 1; }
+mkdir -p backups
+b="backups/config-before-schedule-$(date +%Y%m%d-%H%M%S).yaml"
+cp -p config/config.yaml "$b"
+
+python3 - config/config.yaml "$WINDOWS" <<'EOF'
+import re, sys
+path, windows = sys.argv[1], dict(w.split("=") for w in sys.argv[2].split())
+lines = open(path).read().split("\n")
+cam, in_sched, seen = None, False, set()
+for i, line in enumerate(lines):
+    if re.match(r"[^\s#]", line):                      # top-level key: the camera list is over
+        cam = None; continue
+    m = re.match(r"\s*-\s*id:\s*\"?([^\"\s]+)", line)
+    if m:
+        cam, in_sched = m.group(1), False; continue
+    if cam not in windows:
+        continue
+    ind = len(line) - len(line.lstrip())
+    if re.match(r"\s*schedule:", line):
+        in_sched, sched_ind = True, ind; continue
+    if in_sched and line.strip() and ind <= sched_ind:
+        in_sched = False
+    start, stop = windows[cam].split("-")
+    if re.match(r"\s*enabled:", line):
+        lines[i] = line[:ind] + "enabled: true"         # the camera, and its schedule, both on
+    elif in_sched and re.match(r"\s*start:", line):
+        lines[i] = line[:ind] + f'start: "{start}"'; seen.add(cam + "start")
+    elif in_sched and re.match(r"\s*stop:", line):
+        lines[i] = line[:ind] + f'stop: "{stop}"'; seen.add(cam + "stop")
+missing = [c for c in windows if c + "start" not in seen or c + "stop" not in seen]
+if missing:
+    sys.exit("no schedule block with start/stop found for: " + ", ".join(missing) + " (settings not changed)")
+open(path, "w").write("\n".join(lines))
+for c, w in windows.items():
+    print(f"  {c}: {w.replace('-', ' -> ')}")
+EOF
+if [ $? -ne 0 ]; then cp -p "$b" config/config.yaml; echo "Settings left as they were."; exit 1; fi
+chown 65532:65532 config/config.yaml; chmod 600 config/config.yaml
+docker compose restart pipeline >/dev/null 2>&1 && echo "Pipeline restarted with the new hours (previous settings: $b)."
