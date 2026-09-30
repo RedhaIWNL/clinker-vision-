@@ -1,6 +1,6 @@
 # Clinker Vision on the plant server: the icons
 
-Everything day to day is done with 5 icons on the server's Desktop. No commands.
+Everything day to day is done with 6 icons on the server's Desktop. No commands.
 
 | Icon | What it does |
 |---|---|
@@ -9,6 +9,7 @@ Everything day to day is done with 5 icons on the server's Desktop. No commands.
 | **Clinker Vision - Viewer** | Opens the alerts page in the browser. |
 | **Clinker Vision - Save logs** | Makes one file on the Desktop (`clinker-logs-<date>.tar.gz`) to send when something is wrong. Camera passwords are hidden. |
 | **Clinker Vision - Roll back** | Goes back to the version that ran before the last update (asks first). Alerts are kept. |
+| **Clinker Vision - Repair** | When it is stuck or not working (for example after a power cut): records the state, fixes everything it can, restarts, tests the cameras. Asks your password. |
 
 The window stays open at the end: read the last line (green ✔ = good, red ✘ = problem), then press Enter.
 
@@ -17,11 +18,33 @@ The window stays open at the end: read the last line (green ✔ = good, red ✘ 
 When you are told a new version is published. The update takes 1-3 minutes (the first one longer: it
 downloads about 2 GB); the cameras are not watched during the restart (about 1 minute).
 
-## If something is wrong
+## If something is wrong (stuck, 0 frames, not healthy, after a power cut...)
 
-1. Click **Status**. A camera that says `standby` is outside its hours: normal.
-2. Click **Save logs** and send the file.
-3. If it started after an update, click **Roll back**.
+Click **Clinker Vision - Repair** (it asks your password). Or, in a terminal:
+
+```bash
+sudo bash ~/clinker-vision-/deploy/server/cv-repair
+```
+
+It first records everything (why the server stopped, crashes, logs; passwords hidden) into
+`clinker-repair-<date>.tar.gz` on the Desktop, then fixes what it can: Docker running and started at
+boot, project files on the newest version (hand edits saved in `backups/`), folder and settings
+permissions, damaged databases moved aside, disk space, images, model memory, a clean restart, and a
+boot service so the system starts by itself after every restart of the server. It then tests every
+camera and says in plain words which one does not answer. **Send the report file.**
+
+Notes:
+- A camera that says `standby` is outside its hours: normal.
+- While one camera does not answer, the pipeline restarts every 5 minutes and all cameras show 0 frames
+  meanwhile: the Repair output names the camera to check (NVR on? network? password?).
+- If it started right after an update, **Roll back** is also possible.
+
+If the Repair icon or file is not there yet (a server set up before 2026-09-30), this one command
+downloads the newest repair script and runs it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RedhaIWNL/clinker-vision-/cam4-day/deploy/server/cv-repair -o /tmp/cv-repair && sudo bash /tmp/cv-repair ~/clinker-vision-
+```
 
 Backups (alerts database, settings, model state) are in the project folder under `backups/`, one folder
 per update; the last 10 are kept.

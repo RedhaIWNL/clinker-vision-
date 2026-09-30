@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# Clinker Vision: repair everything, in one go. Run with sudo:
+#   sudo bash deploy/server/cv-repair            (from the project folder)
+#   sudo bash cv-repair /home/<user>/clinker-vision-   (a copy downloaded from GitHub)
+#
+# 1. records the state FIRST (why the server stopped, crashes, logs; passwords hidden) into one file on
+#    the Desktop: clinker-repair-<date>.tar.gz  -> send it
+# 2. fixes: Docker running and started at boot; project files on the newest version (hand edits saved
+#    aside); folder and settings permissions; damaged databases moved aside; disk space; images;
+#    more memory for the model if it ran out; clean restart in the right order
+# 3. tests every enabled camera (does the NVR answer?)
+# 4. installs a boot service: after every restart of the server the system starts by itself, in order
+# Self-contained on purpose: it must work even when the project files are damaged.
+
+set -u
+[ "$(id -u)" = 0 ] || exec sudo bash "$0" "$@"
+
+# ---------------------------------------------------------------------------------------------------
+ok()   { printf '\033[1;32m  ✔ %s\033[0m\n' "$*"; echo "OK   $*" >> "$R/actions.txt"; }
+warn() { printf '\033[1;33m  ! %s\033[0m\n' "$*"; echo "WARN $*" >> "$R/actions.txt"; PROBLEMS+=("$*"); }
+bad()  { printf '\033[1;31m  ✘ %s\033[0m\n' "$*"; echo "FAIL $*" >> "$R/actions.txt"; PROBLEMS+=("$*"); }
+step() { printf '\n\033[1m[%s] %s\033[0m\n' "$1" "$2"; echo "== $2" >> "$R/actions.txt"; }
+hide() { sed -E 's#(rtsp://)[^/@ ]+@#\1***:***@#g; s#(password[^:]*:).*#\1 ***#I'; }
+PROBLEMS=()
+
+DIR="${1:-}"
+if [ -z "$DIR" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [ -f "$here/../../docker-compose.yml" ]; then DIR="$(cd "$here/../.." && pwd)"
+  else DIR="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)/clinker-vision-"; fi
+fi
+[ -f "$DIR/docker-compose.yml" ] || { echo "Project folder not found: $DIR  (give it: sudo bash cv-repair /path/to/clinker-vision-)"; exit 1; }
+cd "$DIR" || exit 1
+OWNER="${SUDO_USER:-$(stat -c %U "$DIR")}"
+[ "$OWNER" = root ] && OWNER="$(stat -c %U "$DIR")"
+OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6)"
+as_user() { sudo -u "$OWNER" -H "$@"; }
+STAMP="$(date +%Y%m%d-%H%M%S)"
+R="$(mktemp -d)/clinker-repair-$STAMP"; mkdir -p "$R/before" "$R/after"
+SAVE="$DIR/backups/repair-$STAMP"
+port() { local p; p="$(sed -n 's/^WEB_PORT=//p' .env 2>/dev/null | tail -1 | tr -d '\r')"; echo "${p:-8080}"; }
+http_ok() { python3 -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=3)" "$1" >/dev/null 2>&1; }
+cid() { docker compose ps -aq "$1" 2>/dev/null | head -1; }
+
+echo "Clinker Vision repair - $DIR (user $OWNER)"
+
+# ---------------------------------------------------------------------------------------------------
+step 1/9 "Recording the current state (before changing anything)"
+snapshot() {  # $1 = before|after
+  local o="$R/$1" c s
+  { date; uptime; echo; who -b 2>/dev/null; echo; free -h; echo; df -h "$DIR" /var/lib/docker 2>/dev/null; echo; nproc; } > "$o/system.txt" 2>&1
+  command -v sensors >/dev/null && sensors > "$o/temperatures.txt" 2>&1
+  if [ "$1" = before ]; then
+    last -x -n 30 > "$o/reboots-and-shutdowns.txt" 2>&1
+    if command -v journalctl >/dev/null; then
+      journalctl --list-boots --no-pager 2>/dev/null | tail -5 > "$o/boots.txt"
+      journalctl -b -1 -n 400 --no-pager -p warning > "$o/previous-boot-warnings.txt" 2>&1
+      journalctl -b -1 -n 60 --no-pager > "$o/previous-boot-last-lines.txt" 2>&1
+      journalctl -k -b -1 --no-pager 2>/dev/null | grep -i -E "oom|out of memory|thermal|temperat|panic|watchdog|power|killed process" > "$o/previous-boot-kernel-alarms.txt"
+      journalctl -u docker -b 0 -n 200 --no-pager > "$o/docker-service.txt" 2>&1
+    fi
+    { git describe --tags --always; git status --short; git log --oneline -3; } > "$o/git.txt" 2>&1
+    cp .env "$o/env" 2>/dev/null
+    ls -lnd data evidence logs model-state config config/config.yaml > "$o/permissions.txt" 2>&1
+    hide < config/config.yaml > "$o/config.yaml" 2>/dev/null
+  fi
+  { systemctl is-active docker; systemctl is-enabled docker; } > "$o/docker-state.txt" 2>&1
+  docker ps -a > "$o/containers.txt" 2>&1
+  for s in model pipeline; do
+    c="$(cid "$s")"; [ -n "$c" ] || continue
+    docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} restarts={{.RestartCount}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} error={{.State.Error}} health={{if .State.Health}}{{.State.Health.Status}}{{end}} image={{.Config.Image}}' "$c" > "$o/$s-state.txt" 2>&1
+    docker logs --tail 600 "$c" 2>&1 | hide > "$o/$s.log"
+  done
+  python3 -c "import urllib.request,sys; print(urllib.request.urlopen(sys.argv[1], timeout=3).read().decode())" \
+    "http://127.0.0.1:$(port)/api/v1/status" > "$o/status.json" 2>&1
+}
+snapshot before
+MODEL_OOM="$(grep -o 'oom_killed=true' "$R/before/model-state.txt" 2>/dev/null)"
+ok "saved"
+# what the record already says, in plain words
+if [ -s "$R/before/previous-boot-kernel-alarms.txt" ]; then
+  warn "Before the last restart the system logged: $(head -3 "$R/before/previous-boot-kernel-alarms.txt" | cut -c1-160 | tr '\n' ' ')"
+fi
+grep -q -i "crash" "$R/before/reboots-and-shutdowns.txt" 2>/dev/null && warn "The server did not shut down normally (power cut or crash) at least once recently."
+[ -n "$MODEL_OOM" ] && warn "The model had run out of memory (it was stopped by the system)."
+for s in model pipeline; do
+  n="$(sed -n 's/.*restarts=\([0-9]*\).*/\1/p' "$R/before/$s-state.txt" 2>/dev/null)"
+  [ "${n:-0}" -gt 3 ] && warn "The $s had restarted $n times: it kept failing."
+done
+grep -h -o -E '"msg":"(configuration rejected|alert store could not start|camera ingestion stopped|fatal dependency failure|model client could not start)"[^}]{0,200}' \
+  "$R/before/pipeline.log" 2>/dev/null | sort | uniq -c | sort -rn | head -5 | while read -r line; do warn "pipeline said: $(echo "$line" | cut -c1-220)"; done
+
+# ---------------------------------------------------------------------------------------------------
+step 2/9 "Docker"
+if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+  systemctl enable --now containerd docker >/dev/null 2>&1
+  systemctl is-enabled docker >/dev/null 2>&1 && ok "Docker starts at boot" || bad "Docker is not set to start at boot"
+fi
+for _ in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+docker info >/dev/null 2>&1 && ok "Docker is running" || { bad "Docker does not run. Try: sudo systemctl restart docker"; }
+
+# ---------------------------------------------------------------------------------------------------
+step 3/9 "Project files and version"
+mkdir -p "$SAVE"
+if [ -n "$(as_user git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  as_user git diff > "$SAVE/hand-edits.patch" 2>/dev/null
+  as_user git checkout -- . && warn "Project files had been changed by hand: undone (saved in backups/repair-$STAMP/hand-edits.patch)"
+fi
+if as_user git fetch --quiet --tags --force origin 2>/dev/null; then ok "GitHub reachable"
+else warn "GitHub not reachable (no internet?): keeping the version already on this server"; fi
+current="$(sed -n 's/^CV_VERSION=//p' .env 2>/dev/null | tail -1 | tr -d '\r')"
+newest="$(as_user git tag -l 'v*' --sort=-v:refname | head -1)"
+target="${newest:-$current}"
+if [ -n "$target" ]; then
+  as_user git checkout --quiet --detach "$target" && ok "Project files on version $target"
+  touch .env && chown "$OWNER": .env
+  if grep -q '^CV_VERSION=' .env; then sed -i "s|^CV_VERSION=.*|CV_VERSION=$target|" .env; else echo "CV_VERSION=$target" >> .env; fi
+else
+  bad "No version found (no internet and none installed yet)"
+fi
+
+# ---------------------------------------------------------------------------------------------------
+step 4/9 "Settings and folder permissions"
+if [ ! -s config/config.yaml ]; then
+  last_cfg="$(ls -1t backups/*/config.yaml 2>/dev/null | head -1)"
+  if [ -n "$last_cfg" ]; then mkdir -p config; cp "$last_cfg" config/config.yaml; warn "Settings file was missing: restored from $last_cfg"
+  else bad "Settings file config/config.yaml is missing and there is no backup: copy deploy/config.example.yaml and fill in the cameras"; fi
+fi
+mkdir -p data evidence logs model-state
+chown -R 65532:65532 data evidence logs model-state && chown 65532:65532 config/config.yaml && chmod 600 config/config.yaml \
+  && ok "folders and settings belong to the system (user 65532, settings private)"
+# enabled cameras and their stream address (camera blocks only; a schedule block has its own "enabled")
+python3 - config/config.yaml > "$R/cameras.txt" <<'EOF'
+import re, sys
+cams, cam, in_sched = [], None, False
+for line in open(sys.argv[1]):
+    if re.match(r"[^\s#]", line):                    # a top-level key: the camera list is over
+        cam = None; continue
+    m = re.match(r"\s*-\s*id:\s*\"?([^\"\s]+)", line)
+    if m:
+        cam = {"id": m.group(1), "on": False, "url": ""}; cams.append(cam); in_sched = False; continue
+    if cam is None: continue
+    if re.match(r"\s*schedule:", line): in_sched = True
+    if not in_sched and re.match(r"\s*enabled:\s*true", line): cam["on"] = True
+    m = re.match(r"\s*nvr_rtsp_url:\s*\"?([^\"\s]+)", line)
+    if m and not in_sched: cam["url"] = m.group(1)
+for c in cams:
+    if c["on"] and c["url"]: print(c["id"], c["url"])
+EOF
+enabled_cams="$(wc -l < "$R/cameras.txt")"
+ok "cameras on: $(cut -d' ' -f1 "$R/cameras.txt" | paste -sd' ')"
+
+# ---------------------------------------------------------------------------------------------------
+step 5/9 "Stopping, checking the databases, disk space"
+docker compose down --remove-orphans -t 30 >/dev/null 2>&1; ok "stopped"
+for db in data/*.db model-state/*.db; do
+  [ -f "$db" ] || continue
+  t="$(mktemp -d)"; cp "$db" "$t/x.db"; [ -f "$db-wal" ] && cp "$db-wal" "$t/x.db-wal"
+  res="$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('pragma integrity_check').fetchone()[0])" "$t/x.db" 2>&1)"
+  rm -rf "$t"
+  if [ "$res" = ok ]; then ok "$db is healthy"
+  else
+    mkdir -p "$SAVE/damaged"; mv "$db" "$db"-wal "$db"-shm "$SAVE/damaged/" 2>/dev/null
+    warn "$db was damaged ($res): moved to backups/repair-$STAMP/damaged, a new one will be started"
+  fi
+done
+free_gb="$(df -Pk "$DIR" | awk 'NR==2 {print int($4/1048576)}')"
+if [ "$free_gb" -lt 5 ]; then
+  docker image prune -f >/dev/null 2>&1; docker builder prune -f >/dev/null 2>&1
+  ls -1d backups/2*/ 2>/dev/null | head -n -10 | xargs -r rm -rf
+  free_gb="$(df -Pk "$DIR" | awk 'NR==2 {print int($4/1048576)}')"
+  [ "$free_gb" -lt 3 ] && bad "Only $free_gb GB free on the disk: delete old files (evidence/ grows with alerts)" || ok "disk space freed: $free_gb GB free"
+else ok "disk: $free_gb GB free"; fi
+
+# ---------------------------------------------------------------------------------------------------
+step 6/9 "Memory and images"
+ram_gb="$(awk '/MemTotal/ {print int($2/1048576)}' /proc/meminfo)"
+lim="$(sed -n 's/^MODEL_MEMORY_LIMIT=//p' .env | tail -1)"
+if { [ -n "$MODEL_OOM" ] || [ "${enabled_cams:-0}" -ge 3 ]; } && [ "$ram_gb" -ge 8 ] && [ "${lim:-2g}" = 2g ]; then
+  if grep -q '^MODEL_MEMORY_LIMIT=' .env; then sed -i 's|^MODEL_MEMORY_LIMIT=.*|MODEL_MEMORY_LIMIT=4g|' .env; else echo "MODEL_MEMORY_LIMIT=4g" >> .env; fi
+  ok "model memory raised to 4 GB (server has $ram_gb GB; ${enabled_cams:-?} cameras on)"
+else ok "memory: server $ram_gb GB, model limit ${lim:-2g}"; fi
+missing=""
+for i in $(docker compose config --images 2>/dev/null); do docker image inspect "$i" >/dev/null 2>&1 || missing=1; done
+if [ -n "$missing" ]; then
+  docker compose pull >/dev/null 2>&1 && ok "images downloaded" || bad "images for $target could not be downloaded (internet?)"
+else ok "images present"; fi
+
+# ---------------------------------------------------------------------------------------------------
+step 7/9 "Starting (model first, then the pipeline)"
+docker compose up -d --no-build --force-recreate --remove-orphans >/dev/null 2>&1
+started=""
+for t in $(seq 0 5 300); do
+  h="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$(cid model)" 2>/dev/null)"
+  if [ "$h" = healthy ] && http_ok "http://127.0.0.1:$(port)/health/live"; then started=1; break; fi
+  printf '\r    waiting... %3ds (model: %s)   ' "$t" "${h:-starting}"; sleep 5
+done; echo
+if [ -n "$started" ]; then ok "model and pipeline are running"
+else
+  bad "the system did not start within 5 minutes"
+  docker compose logs --tail 15 model pipeline 2>&1 | hide | sed 's/^/      /'
+fi
+
+# ---------------------------------------------------------------------------------------------------
+step 8/9 "Cameras: does each one answer?"
+img="$(docker compose config --images 2>/dev/null | grep pipeline | head -1)"
+while read -r id url; do
+  out="$(timeout 25 docker run --rm --network host --entrypoint ffprobe "$img" -rtsp_transport tcp -v error \
+        -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$url" 2>&1 | tail -1)"
+  case "$out" in
+    2688,1520) ok "$id answers (2688x1520, the right stream)" ;;
+    [0-9]*,[0-9]*) bad "$id answers but sends $out instead of 2688x1520: the camera URL must use the main stream (subtype=0)" ;;
+    *401*|*nauthorized*) bad "$id: wrong NVR user or password in the settings" ;;
+    "") bad "$id does not answer (no reply in 25 s): is the NVR on and reachable from the server? The pipeline restarts every 5 minutes while a camera is down." ;;
+    *) bad "$id does not answer: $(echo "$out" | hide | cut -c1-150)" ;;
+  esac
+done < "$R/cameras.txt"
+[ -s "$R/cameras.txt" ] || warn "no enabled camera found in the settings"
+
+# ---------------------------------------------------------------------------------------------------
+step 9/9 "Start by itself after every restart of the server"
+if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+  cat > /etc/systemd/system/clinker-vision.service <<EOF
+[Unit]
+Description=Clinker Vision (model + pipeline, docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$DIR
+ExecStart=/usr/bin/docker compose up -d --no-build --remove-orphans
+ExecStop=/usr/bin/docker compose stop -t 30
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload && systemctl enable clinker-vision.service >/dev/null 2>&1 \
+    && ok "boot service installed: starts after Docker and the network, stops cleanly at shutdown" \
+    || bad "could not install the boot service"
+else warn "no systemd here: boot service not installed"; fi
+# the Repair icon, for next time
+desk="$(sudo -u "$OWNER" xdg-user-dir DESKTOP 2>/dev/null || echo "$OWNER_HOME/Desktop")"
+if [ -d "$desk" ]; then
+  term="gnome-terminal --title=\"Clinker Vision - Repair\" -- bash -c 'sudo bash \"$DIR/deploy/server/cv-repair\"; read -r -p \"Press Enter to close.\" _'"
+  command -v gnome-terminal >/dev/null || term="x-terminal-emulator -e bash -c 'sudo bash \"$DIR/deploy/server/cv-repair\"; read -r -p \"Press Enter to close.\" _'"
+  printf '[Desktop Entry]\nType=Application\nName=Clinker Vision - Repair\nComment=Fix everything and restart (asks the password)\nIcon=applications-system\nExec=%s\nTerminal=false\n' "$term" > "$desk/clinker-repair.desktop"
+  chown "$OWNER": "$desk/clinker-repair.desktop"; chmod +x "$desk/clinker-repair.desktop"
+  sudo -u "$OWNER" gio set "$desk/clinker-repair.desktop" metadata::trusted true 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------------------------------
+chown -R "$OWNER": backups .env 2>/dev/null
+[ -n "$started" ] && sleep 60                         # let the cameras connect before the last look
+snapshot after
+echo; printf '\033[1mCameras now:\033[0m\n'
+python3 - "$R/after/status.json" <<'EOF'
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    print("  the pipeline does not answer"); sys.exit()
+for c in s.get("cameras") or [s]:
+    n = int((c.get("counters") or {}).get("frames_total", 0))
+    print("  %-6s %-10s %s  (%s frames)" % (c.get("camera_id") or "?", c.get("status", "?"), c.get("detail", ""), format(n, ",")))
+EOF
+out="$(sudo -u "$OWNER" xdg-user-dir DESKTOP 2>/dev/null || echo "$OWNER_HOME")"; [ -d "$out" ] || out="$OWNER_HOME"
+tar -czf "$out/clinker-repair-$STAMP.tar.gz" -C "$(dirname "$R")" "$(basename "$R")" && chown "$OWNER": "$out/clinker-repair-$STAMP.tar.gz"
+rm -rf "$(dirname "$R")"
+echo
+if [ ${#PROBLEMS[@]} -eq 0 ]; then printf '\033[1;32mEverything is fine.\033[0m\n'
+else
+  printf '\033[1;33mPoints found (the fixable ones are fixed; the others need you):\033[0m\n'
+  for p in "${PROBLEMS[@]}"; do echo "  - $p"; done
+fi
+echo "Report: $out/clinker-repair-$STAMP.tar.gz  (send this file)"

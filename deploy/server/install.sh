@@ -60,6 +60,10 @@ make_icon clinker-status   "Clinker Vision - Status"    "Is it running? Version 
 make_icon clinker-viewer   "Clinker Vision - Viewer"    "Open the alerts viewer"                            web-browser        "xdg-open http://127.0.0.1:$(web_port)"
 make_icon clinker-logs     "Clinker Vision - Save logs" "One file on the Desktop to send when something is wrong" document-save "$(term 'Save logs' cv-logs)"
 make_icon clinker-rollback "Clinker Vision - Roll back" "Go back to the version before the last update"     edit-undo          "$(term 'Roll back' cv-rollback)"
+repair="bash -c 'sudo bash \"$here/cv-repair\"; read -r -p \"Press Enter to close.\" _'"
+if command -v gnome-terminal >/dev/null; then repair="gnome-terminal --title=\"Clinker Vision - Repair\" -- $repair"
+else repair="x-terminal-emulator -e $repair"; fi
+make_icon clinker-repair   "Clinker Vision - Repair"    "Stuck or not working: record the state, fix everything, restart (asks the password)" applications-system "$repair"
 
 echo
 ok "Done. If an icon shows a warning the first time, right-click it and choose 'Allow Launching'."
