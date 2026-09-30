@@ -49,9 +49,13 @@ class Cam4Identity:
         self.phase = float(idn["phase"]); self.n = int(idn["godets"])
         self.piece, self.step = int(idn["piece"]), int(idn["step"])
         self.min_match = float(idn["min_match"])
-        self.ext = np.concatenate([self.ref, self.ref[:, :self.piece + 10]], 1)
+        # Camera 3's strip stretches by up to +-6 % (its odometer reading drifts): pieces are matched at
+        # several scales and the odometer-to-map scale may drift further. CAM-4: one scale, +-2 %.
+        self.scales = tuple(idn.get("scales", (1.0,)))
+        self.scale_clip = tuple(idn.get("scale_clip", (0.98, 1.02)))
+        self.ext = np.concatenate([self.ref, self.ref[:, :int(self.piece * max(self.scales)) + 10]], 1)
         self.var = np.square(np.array(idn["fingerprint_std"], np.float32))
-        self.fp = np.zeros((2, 0), np.float32); self.fp0 = 0      # normalised fingerprint buffer
+        self.fp = np.zeros((self.ref.shape[0], 0), np.float32); self.fp0 = 0   # normalised fingerprint buffer
         self.next_piece_end = None
         self.pending = deque()        # (col, sev, top, missing) waiting for a position
         self.locked = False
@@ -106,20 +110,37 @@ class Cam4Identity:
         if len(self.anchors) >= 3:
             cs = np.array([a[0] for a in self.anchors], float); ps = np.array([a[1] for a in self.anchors], float)
             if cs[-1] - cs[0] >= 15000:
-                scale = float(np.clip(np.polyfit(cs, ps, 1)[0], 0.98, 1.02))
+                scale = float(np.clip(np.polyfit(cs, ps, 1)[0], *self.scale_clip))
         return p_last + (col - c_last) * scale
+
+    def _match(self, image, piece):
+        """Best match over the scales: (score, index of the piece centre in image)."""
+        best = (-1.0, 0.0)
+        for sc in self.scales:
+            pc = piece if sc == 1.0 else np.ascontiguousarray(cv2.resize(
+                piece, (int(round(piece.shape[1] * sc)), piece.shape[0]), interpolation=cv2.INTER_LINEAR))
+            if pc.shape[1] > image.shape[1]:
+                continue
+            r = cv2.matchTemplate(image, pc, cv2.TM_CCOEFF_NORMED)[0]
+            k = int(np.argmax(r))
+            if r[k] > best[0]:
+                best = (float(r[k]), k + pc.shape[1] / 2)
+        return best
 
     def _piece(self, piece, centre):
         self.counters["pieces_total"] += 1
         if not np.any(piece):
             return
         if not self.locked:
-            r = cv2.matchTemplate(self.ext, piece, cv2.TM_CCOEFF_NORMED)[0]
-            k = int(np.argmax(r))
-            if r[k] < self.min_match:
+            if self.scales == (1.0,):
+                r = cv2.matchTemplate(self.ext, piece, cv2.TM_CCOEFF_NORMED)[0]
+                k = int(np.argmax(r)); q, kc = float(r[k]), k + self.piece // 2
+            else:
+                q, kc = self._match(self.ext, piece)
+            if q < self.min_match:
                 self.cand = None
                 return
-            pos = (k + self.piece // 2) % self.L
+            pos = kc % self.L
             if self.cand is not None and abs(self._circ((pos - self.cand[1]) - (centre - self.cand[0]))) < LOCK_AGREE:
                 p0 = self.cand[1]
                 self.anchors.clear()
@@ -136,12 +157,15 @@ class Cam4Identity:
             return
         pred = self._predict(centre)
         lo = int(np.floor(pred)) - LOCAL_WINDOW - self.piece // 2
-        idx = np.arange(lo, lo + 2 * LOCAL_WINDOW + self.piece) % self.L
-        seg = self.ref[:, idx]
-        r = cv2.matchTemplate(seg, piece, cv2.TM_CCOEFF_NORMED)[0]
-        k = int(np.argmax(r))
-        if r[k] >= LOCAL_MIN:
-            pos = lo + k + self.piece // 2                     # unwrapped, near pred
+        idx = np.arange(lo, lo + 2 * LOCAL_WINDOW + int(self.piece * max(self.scales)) + 1) % self.L
+        seg = np.ascontiguousarray(self.ref[:, idx])
+        if self.scales == (1.0,):
+            r = cv2.matchTemplate(seg[:, :2 * LOCAL_WINDOW + self.piece], piece, cv2.TM_CCOEFF_NORMED)[0]
+            k = int(np.argmax(r)); q, kc = float(r[k]), k + self.piece // 2
+        else:
+            q, kc = self._match(seg, piece)
+        if q >= LOCAL_MIN:
+            pos = lo + kc                                      # unwrapped, near pred
             self.anchors.append((centre, float(pos)))
             self.counters["anchors_total"] += 1
         elif centre - self.anchors[-1][0] > LOST_COLS:

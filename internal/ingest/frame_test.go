@@ -147,3 +147,46 @@ func fakeJPEG(payload string) []byte {
 func helperCommand(output []byte) *exec.Cmd {
 	return exec.Command("printf", "%s", string(output))
 }
+
+func TestDecoderUsesTCPOnlyForRTSP(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   bool
+	}{
+		{"rtsp://nvr.example.local:554/cam/realmonitor?channel=4&subtype=0", true},
+		{"RTSP://nvr.example.local/stream", true},
+		{"fixture.mp4", false},
+	} {
+		var got []string
+		decoder := Decoder{
+			CameraID: "CAM-4",
+			Source:   tc.source,
+			Command: func(_ context.Context, _ string, args ...string) *exec.Cmd {
+				got = args
+				return helperCommand(fakeJPEG("frame"))
+			},
+		}
+		_ = decoder.Run(context.Background(), func(Frame) error { return nil })
+		has := false
+		for i := 0; i+1 < len(got); i++ {
+			if got[i] == "-rtsp_transport" && got[i+1] == "tcp" {
+				has = true
+			}
+		}
+		if has != tc.want {
+			t.Fatalf("%s: -rtsp_transport tcp present=%v, want %v (args %v)", tc.source, has, tc.want, got)
+		}
+		if tc.want && (got[len(got)-1] != "-" || indexOf(got, "-rtsp_transport") > indexOf(got, "-i")) {
+			t.Fatalf("%s: -rtsp_transport must come before -i: %v", tc.source, got)
+		}
+	}
+}
+
+func indexOf(args []string, value string) int {
+	for i, a := range args {
+		if a == value {
+			return i
+		}
+	}
+	return -1
+}

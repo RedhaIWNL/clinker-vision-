@@ -77,6 +77,8 @@ def main():
     a = ap.parse_args()
     out = Path(a.out); (out / "evidence").mkdir(parents=True, exist_ok=True)
     eng = Cam4Engine(a.bundle)
+    if eng.wheels is not None:
+        eng.wheels.trace = []                                   # every wheel evaluation, for diagnosis
     report = {"bundle": eng.version, "videos": [], "minutes": []}
     kept = 0
 
@@ -140,8 +142,20 @@ def main():
     report["health"] = {"status": st.health.status, "detail": st.health.detail,
                         "counters": dict(st.health.counters)}
     report["evidence_files"] = kept
+    report["wheel_events"] = [{"key": e.event_key, "kind": e.kind, "first": int(e.measurements["first_godet"]),
+                               "last": int(e.measurements["last_godet"]), "godets": int(e.measurements["godets"]),
+                               "wheels": int(e.measurements["wheels"]), "evidence_frame_id": e.evidence_frame_id}
+                              for e in st.events if e.kind.startswith("wheel_")]
+    if eng.wheels is not None:
+        with eng.wheels.flags_lock:
+            report["wheel_flags_all"] = {k: {kk: vv for kk, vv in f.items() if kk != "evidence"}
+                                         for k, f in eng.wheels.flags.items()}
+        report["wheel_counters"] = dict(eng.wheels.counters)
+        report["wheel_trace"] = eng.wheels.trace
     (out / "replay.json").write_text(json.dumps(report, indent=1))
     print("confirmed", len(report["confirmed"]), report["confirmed"])
+    print("wheel events (active):", len(report["wheel_events"]), "| all flags ever:",
+          len(report.get("wheel_flags_all", {})), report.get("wheel_counters"))
 
 
 if __name__ == "__main__":

@@ -268,14 +268,14 @@ func nightReportPaths(sqlitePath string, windowStart time.Time) (statsPath, repo
 }
 
 // windowReportPaths names one camera's window sidecar and report. CAM-1 keeps the
-// original night-<date> names; other cameras get <camera>-<date> (CAM-4: CAM-4-day-<date>).
+// original night-<date> names; other cameras get <camera>-<date> (CAM-3/CAM-4: <camera>-day-<date>).
 func windowReportPaths(sqlitePath, cameraID string, windowStart time.Time) (statsPath, reportPath string) {
 	if cameraID == "" || cameraID == "CAM-1" {
 		return nightReportPaths(sqlitePath, windowStart)
 	}
 	name := cameraID
-	if cameraID == "CAM-4" {
-		name = "CAM-4-day"
+	if cameraID == "CAM-3" || cameraID == "CAM-4" { // side-plate cameras run by day
+		name = cameraID + "-day"
 	}
 	dir := filepath.Dir(sqlitePath)
 	day := windowStart.Format("2006-01-02")
@@ -874,7 +874,7 @@ func main() {
 	env := &laneEnv{
 		cfg: cfg, logger: logger, health: healthHandler, metrics: metricHandler,
 		status: statusStore, store: alertStore, model: modelClient, loc: loc,
-		reportFatal: reportFatal,
+		reportFatal:    reportFatal,
 		dependencyTO:   dependencyTimeout,
 		requestTimeout: time.Duration(cfg.Model.RequestTimeoutSeconds) * time.Second,
 		statePoll:      time.Duration(cfg.Model.StatePollSeconds) * time.Second,

@@ -84,6 +84,34 @@
    "NVR_ch4_main_20260907100000_20260907110000.mp4",
    "NVR_ch4_main_20260907120003_20260907130000.mp4"
   ],
-  "plan": "CAM4_DAY_PLAN_v2.md"
+  "plan": "CAM4_DAY_PLAN_v2.md",
+  "wheels": "cam4/wheels.py + cam4/wheelmap.py, 2026-09-27 (WHEELS_PLAN.md); 10:00+noon: ~1 wheel per 4.0 godets"
+ },
+ "wheels": {
+  "stripe_rows": [
+   326,
+   329
+  ],
+  "stripe_above": [
+   320,
+   323
+  ],
+  "stripe_below": [
+   332,
+   335
+  ],
+  "hidden_frac": 0.7,
+  "min_width": 90,
+  "typical_width": 130,
+  "min_quality": 0.3,
+  "min_step": 4.0,
+  "join_gap": 40,
+  "min_contrast_frac": 0.5,
+  "max_hidden_frac": 0.6,
+  "hidden_window": 801,
+  "strip_rows": [
+   140,
+   340
+  ]
  }
 }

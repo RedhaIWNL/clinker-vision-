@@ -1,5 +1,10 @@
 # Running CAM-1 + CAM-4: step by step
 
+> **Since 2026-09-30, updating, starting, status, logs and going back are done with the desktop
+> icons: see [RUN-SERVER.md](RUN-SERVER.md).** Steps 1, 2, 5 and 9 below are what the Update, Save logs
+> and Roll back icons do for you; this page stays the reference for the camera settings (0, 3, 4, 4b,
+> 4c) and for reading the status and alerts (6-8b).
+
 Run these on the plant server, in the project folder (where `docker-compose.yml` is).
 Each step shows what you should see. If a step does not show it, stop there.
 
@@ -8,6 +13,13 @@ its own hours. It also fixes the night problem where the model skipped every fra
 the pipeline restarted, and kept warning "median frame peak < 0.5, camera moved?".
 
 ---
+
+## 0. Camera 1 was re-aimed: turn its old lane off
+
+Camera 1 now looks at the chain end after the sprocket. The Camera 1 model in this system was
+calibrated on the old view, so it can't work on the new one. In `config/config.yaml`, set the
+CAM-1 block to `enabled: false` (keep its URL for later), then
+`docker compose up -d --force-recreate pipeline`. At least one camera (CAM-4) must stay enabled.
 
 ## 1. Get the new version
 
@@ -75,6 +87,56 @@ Keep the file protected (the pipeline refuses to start otherwise):
 sudo chown 65532:65532 config/config.yaml
 sudo chmod 600 config/config.yaml
 ```
+
+## 4b. Turn CAM-3 on (the other side of the chain)
+
+CAM-3 uses the same engine with its own bundle (`model/cam3`, already loaded by
+docker-compose). In `config/config.yaml`, replace the `CAM-3` block with:
+
+```yaml
+  - id: "CAM-3"
+    enabled: true
+    nvr_rtsp_url: "rtsp://admin:PASSWORD@192.168.1.200:554/cam/realmonitor?channel=3&subtype=0"
+    sample_interval_seconds: 1
+    queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "09:00"
+      stop: "16:00"
+      timezone: "Africa/Casablanca"
+```
+
+Check it as for CAM-4 below, with `CAM-3` in the commands (`CAM-3 bundle loaded ... godets=1210`).
+It locks onto its chain map about 1 minute after the chain moves. When the conveyor runs
+empty, its status says `conveyor empty: plates not judged` and no alert is raised there.
+
+## 4c. Turn the new Camera 1 on (re-aimed view: wheels + godet outside damage, day and night)
+
+The old CAM-1 model does not fit the new view; the model now serves CAM-1 with the side-plate
+engine and bundle `model/cam1new` (already loaded by docker-compose; it replaces the old CAM-1 model).
+In `config/config.yaml`, replace the `CAM-1` block with:
+
+```yaml
+  - id: "CAM-1"
+    enabled: true
+    nvr_rtsp_url: "rtsp://admin:PASSWORD@192.168.1.200:554/cam/realmonitor?channel=1&subtype=0"
+    sample_interval_seconds: 1
+    queue_capacity: 64
+    schedule:
+      enabled: true
+      start: "06:01"
+      stop: "06:00"
+      timezone: "Africa/Casablanca"
+```
+
+This runs almost 24 hours; the window closes one minute a day so the daily report is written.
+Check it as for CAM-4 below with `CAM-1` (`CAM-1: side-plate bundle ... replaces the old CAM-1 model`,
+then `CAM-1 bundle loaded ... godets=1210`). It locks onto its chain map about 40 s after the chain
+moves; alerts need a godet seen on 2 passes (about 16 minutes). Alerts:
+- `CAM-1:DAMAGE:<godet>:<loop>`: godet outside damage; its measurements say the type
+  (`damage_type` 1 = cut, 2 = out of line, 3 = both) and `severity` (0-1);
+- wheel alerts as for CAM-4 (gap, density, and `wheel_missing`: a known wheel absent on the 2 latest passes).
+Camera 1 sees the same side of the chain as CAM-4.
 
 ## 5. Build and start
 
@@ -147,6 +209,28 @@ cat data/reports/CAM-4-day-$(date +%F).md
 ```
 
 CAM-1 keeps its `night-<date>.md` reports.
+
+## 8b. Wheel (galet) alerts
+
+CAM-4 also watches the wheels under the chain. There is normally one wheel every 4 godets. It
+raises three kinds of alert (camera CAM-4, target **galet**):
+
+| Alert | Meaning | When |
+|---|---|---|
+| `WHEEL_GAP` | 5 or more godets in a row without a wheel | once per place (it's how the chain is built) |
+| `WHEEL_DENSITY` | 2 or more wheels within 3 godets | once per place |
+| `WHEEL_MISSING` | a wheel that was there is gone on the last 2 passes | when it happens (a change: check the chain) |
+
+The godet number is the first godet of the place; the measurements give `first_godet`,
+`last_godet`, `godets` and `wheels`. The picture is the unrolled chain around the place, with
+godet numbers, wheels boxed and the flagged stretch framed.
+
+- The first wheel alerts appear after **2 chain loops** (about 35 minutes of moving chain).
+- On the 2026-09-07 recordings: about 14 gap places and 9–10 density places per loop, and no
+  missing wheel.
+- `WHEEL_GAP` and `WHEEL_DENSITY` are the fixed pattern of the chain. Mark them seen once
+  they're checked; they won't come back under the same key.
+- A **`WHEEL_MISSING` is the one to act on.**
 
 ## 9. If something goes wrong
 

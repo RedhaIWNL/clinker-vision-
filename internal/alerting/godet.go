@@ -17,6 +17,15 @@ import (
 
 var fixedGodetBox = evidence.BoundingBox{X: 0.3806, Y: 0.1158, Width: 0.0536, Height: 0.1697}
 
+// eventKinds maps a Tier-2 event kind to what is stored: the observation target and the fault
+// type. Wheel (galet) kinds come from the side-plate cameras' wheel tracker.
+var eventKinds = map[string]struct{ target, fault string }{
+	"damage":        {"godet", "DAMAGE"},
+	"wheel_gap":     {"galet", "WHEEL_GAP"},     // 5 or more godets in a row without a wheel
+	"wheel_density": {"galet", "WHEEL_DENSITY"}, // 2 or more wheels within 3 godets
+	"wheel_missing": {"galet", "WHEEL_MISSING"}, // a known wheel absent on 2 passes
+}
+
 // EventKey is the stable deduplication key of a godet damage event. CAM-1 keeps its
 // original DAMAGE:<godet>:<loop> keys; other cameras are prefixed so equal godet and
 // loop numbers on two cameras never share (and overwrite) one alert.
@@ -98,7 +107,8 @@ func ProcessGodetState(ctx context.Context, state *inferencev2.GodetStateRespons
 }
 
 func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateResponse, event *inferencev2.GodetAlertEvent, godet *inferencev2.GodetState, frame ingest.Frame, quality int, evidenceRoot string, alertStore *store.Store, now func() time.Time) (*store.Alert, error) {
-	if event == nil || event.GetKind() != "damage" || (event.GetState() != "pending" && event.GetState() != "confirmed") || event.GetGodetId() <= 0 || event.GetLoopNo() < 0 {
+	kind, known := eventKinds[event.GetKind()]
+	if event == nil || !known || (event.GetState() != "pending" && event.GetState() != "confirmed") || event.GetGodetId() <= 0 || event.GetLoopNo() < 0 {
 		return nil, nil
 	}
 	if godet == nil {
@@ -121,10 +131,13 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	for key, value := range event.GetMeasurements() {
 		measurementValues[key] = value
 	}
-	if frame.CameraID == "CAM-4" {
+	switch {
+	case kind.target == "galet":
+		// wheel events carry their own measurements (first/last godet, godets, wheels)
+	case frame.CameraID == "CAM-3" || frame.CameraID == "CAM-4": // side-plate damage
 		measurementValues["severity"] = godet.GetSeverity()
 		measurementValues["passes_seen"] = godet.GetPassesSeen()
-	} else {
+	default:
 		measurementValues["lip"] = godet.GetLip()
 		measurementValues["near_plate"] = godet.GetNearPlate()
 	}
@@ -143,7 +156,7 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 		return nil, err
 	}
 	box := eventBox(event)
-	jpegData, err := evidence.RenderJPEGWithBoxes(frame.ImageData, []evidence.BoxOverlay{{FaultType: "DAMAGE", BoundingBox: box}}, quality)
+	jpegData, err := evidence.RenderJPEGWithBoxes(frame.ImageData, []evidence.BoxOverlay{{FaultType: kind.fault, BoundingBox: box}}, quality)
 	if err != nil {
 		return nil, fmt.Errorf("render godet evidence: %w", err)
 	}
@@ -154,7 +167,7 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	if evidenceFrameID == "" || evidenceFrameID != frame.FrameID {
 		evidenceFrameID = frame.FrameID
 	}
-	alert := store.Alert{AlertID: alertID.String(), CapturedAt: capturedAt, DetectedAt: seenNow, CreatedAt: seenNow, CameraID: frame.CameraID, ObservationTarget: "godet", FaultType: "DAMAGE", FrameID: frame.FrameID, ModelVersion: state.GetModelVersion(), BoundingBox: store.BoundingBox{X: box.X, Y: box.Y, Width: box.Width, Height: box.Height}, EvidenceRef: ref, GodetID: event.GetGodetId(), AlertState: strings.ToLower(event.GetState()), LoopNo: event.GetLoopNo(), RuleID: "DAMAGE", EventKey: eventKey, EvidenceFrameID: evidenceFrameID, MeasurementsJSON: string(measurements)}
+	alert := store.Alert{AlertID: alertID.String(), CapturedAt: capturedAt, DetectedAt: seenNow, CreatedAt: seenNow, CameraID: frame.CameraID, ObservationTarget: kind.target, FaultType: kind.fault, FrameID: frame.FrameID, ModelVersion: state.GetModelVersion(), BoundingBox: store.BoundingBox{X: box.X, Y: box.Y, Width: box.Width, Height: box.Height}, EvidenceRef: ref, GodetID: event.GetGodetId(), AlertState: strings.ToLower(event.GetState()), LoopNo: event.GetLoopNo(), RuleID: kind.fault, EventKey: eventKey, EvidenceFrameID: evidenceFrameID, MeasurementsJSON: string(measurements)}
 	if err := alertStore.UpsertGodetAlert(ctx, alert); err != nil {
 		_ = evidence.Remove(evidenceRoot, ref)
 		return nil, err

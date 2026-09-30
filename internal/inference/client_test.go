@@ -222,12 +222,30 @@ func (s *failOnceService) GetGodetState(context.Context, *inferencev2.GodetState
 func TestValidateResponseForCameraCAM4(t *testing.T) {
 	ok := &inferencev2.InferenceResponse{FrameId: "f", ModelVersion: "m", ProcessedAt: timestamppb.Now(),
 		ScalarMeasurements: map[string]float32{"chain_step": 8.1, "chain_pos": 1000, "match_quality": 0.7, "chain_status": 0},
-		RetainedFrames: []*inferencev2.RetainedFrame{{FrameId: "550e8400-e29b-41d4-a716-446655440001", ImageData: []byte{1}, CapturedAt: timestamppb.Now()}}}
+		RetainedFrames:     []*inferencev2.RetainedFrame{{FrameId: "550e8400-e29b-41d4-a716-446655440001", ImageData: []byte{1}, CapturedAt: timestamppb.Now()}}}
 	if _, err := ValidateResponseForCamera("f", "CAM-4", ok); err != nil {
 		t.Fatalf("valid CAM-4 response rejected: %v", err)
 	}
-	if _, err := ValidateResponseForCamera("f", "CAM-1", ok); err == nil {
-		t.Fatal("CAM-1 rules must still require peak/dx/dy/slot")
+	if _, err := ValidateResponseForCamera("f", "CAM-3", ok); err != nil {
+		t.Fatalf("CAM-3 uses the side-plate rules: %v", err)
+	}
+	// the re-aimed Camera 1 is served by the side-plate engine: its side-plate measurements are accepted
+	if _, err := ValidateResponseForCamera("f", "CAM-1", ok); err != nil {
+		t.Fatalf("CAM-1 served by the side-plate engine rejected: %v", err)
+	}
+	partial := proto.Clone(ok).(*inferencev2.InferenceResponse)
+	delete(partial.ScalarMeasurements, "match_quality")
+	if _, err := ValidateResponseForCamera("f", "CAM-1", partial); err == nil {
+		t.Fatal("CAM-1 side-plate response without match_quality accepted")
+	}
+	old := &inferencev2.InferenceResponse{FrameId: "f", ModelVersion: "m", ProcessedAt: timestamppb.Now(),
+		ScalarMeasurements: map[string]float32{"peak": 1, "dx": 0, "dy": 0, "slot": 3}}
+	if _, err := ValidateResponseForCamera("f", "CAM-1", old); err != nil {
+		t.Fatalf("old CAM-1 response rejected: %v", err)
+	}
+	delete(old.ScalarMeasurements, "slot")
+	if _, err := ValidateResponseForCamera("f", "CAM-1", old); err == nil {
+		t.Fatal("old CAM-1 response without slot accepted")
 	}
 	bad := proto.Clone(ok).(*inferencev2.InferenceResponse)
 	bad.ScalarMeasurements["chain_status"] = 7

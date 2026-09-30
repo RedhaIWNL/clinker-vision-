@@ -1,4 +1,4 @@
-"""CAM-4 calibration bundle: load, verify checksums, model_version."""
+"""Side-plate calibration bundle (CAM-4, CAM-3): load, verify checksums, model_version."""
 from __future__ import annotations
 
 import hashlib
@@ -30,38 +30,48 @@ class Cam4Bundle:
     det: dict
     ident: dict
     rules: dict
-    chainmap: np.ndarray     # 2 x loop_cols float32, unit-std fingerprint of one loop
+    chainmap: np.ndarray     # channels x loop_cols float32, unit-std fingerprint of one loop (CAM-4: 2)
     thresholds_id: str
+    camera_id: str           # CAM-4 | CAM-3 (from calibration.json)
     version: str             # <chainmap-sha8>+<build>+<thresholds-id>
+    wheels: dict | None = None   # wheel (galet) detector settings; None = no wheel tracking
+    strip_rows: tuple | None = None  # mosaic rows the stream keeps; None = CAM-4's 40..340
+    wheel_template: np.ndarray | None = None   # disc wheels (Camera 3, new Camera 1): the wheel picture to match
+    plates: dict | None = None                 # new Camera 1: godet outside damage per plate (cam4/plates.py)
+    plate_models: tuple = ()                   # its ONNX files
 
 
 def load_cam4_bundle(d) -> Cam4Bundle:
     d = Path(d)
     for f in ("calibration.json", "chainmap.npy", "CHECKSUMS.sha256"):
         if not (d / f).exists():
-            raise BundleError(f"CAM-4 bundle {d} missing {f}: refuse to serve")
+            raise BundleError(f"side-plate bundle {d} missing {f}: refuse to serve")
     want = {}
     for line in (d / "CHECKSUMS.sha256").read_text().splitlines():
         h, _, name = line.partition("  ")
         if name.strip():
             want[name.strip()] = h.strip()
-    for name in ("calibration.json", "chainmap.npy"):
+    extra = tuple(n for n in ("wheel_template.npy", "plate_cnn_s0.onnx", "plate_cnn_s1.onnx", "plate_cnn_s2.onnx") if (d / n).exists())
+    for name in ("calibration.json", "chainmap.npy") + extra:
         p = d / name
         if want.get(name) != hashlib.sha256(p.read_bytes()).hexdigest():
-            raise BundleError(f"CAM-4 bundle checksum mismatch on {name}: refuse to serve")
+            raise BundleError(f"side-plate bundle checksum mismatch on {name}: refuse to serve")
     cal = json.loads((d / "calibration.json").read_text())
     if cal.get("bundle_format") != BUNDLE_FORMAT:
-        raise BundleError(f"CAM-4 bundle format {cal.get('bundle_format')!r}, expected {BUNDLE_FORMAT!r}")
+        raise BundleError(f"side-plate bundle format {cal.get('bundle_format')!r}, expected {BUNDLE_FORMAT!r}")
     chain = np.load(d / "chainmap.npy").astype(np.float32)
     idn = cal["identity"]
-    if chain.shape != (2, idn["loop_cols"]):
-        raise BundleError(f"CAM-4 chain map shape {chain.shape} != (2, {idn['loop_cols']})")
+    n_ch = len(idn["fingerprint_std"])
+    if chain.shape != (n_ch, idn["loop_cols"]):
+        raise BundleError(f"side-plate chain map shape {chain.shape} != ({n_ch}, {idn['loop_cols']})")
     if abs(idn["loop_cols"] / idn["godets"] - idn["pitch"]) > 1e-3:
-        raise BundleError("CAM-4 bundle loop_cols / godets != pitch")
+        raise BundleError("side-plate bundle loop_cols / godets != pitch")
     g = cal["geometry"]
     ang = math.radians(g["travel_deg"])
     u = np.array([math.cos(ang), math.sin(ang)])
     v = np.array([-u[1], u[0]]) if -u[1] > 0 else np.array([u[1], -u[0]])
+    if (v[0] > 0) != (g.get("rail_side", "+x") == "+x"):     # Camera 3 is CAM-4 mirrored: rail toward -x
+        v = -v
     sha8 = hashlib.sha256((d / "chainmap.npy").read_bytes()).hexdigest()[:8]
     build = os.environ.get("MODEL_BUILD", "dev")
     return Cam4Bundle(
@@ -69,5 +79,8 @@ def load_cam4_bundle(d) -> Cam4Bundle:
         slit_half=int(g["slit_half"]), pad=int(g["mosaic_pad"]),
         odo_a=tuple(g["odo_a"]), odo_b=tuple(g["odo_b"]), slit_a=tuple(g["slit_a"]),
         baselines=tuple(g["baselines"]), det=cal["detector"], ident=idn, rules=cal["rules"],
-        chainmap=chain, thresholds_id=cal["thresholds_id"],
+        chainmap=chain, thresholds_id=cal["thresholds_id"], camera_id=cal.get("camera_id", "CAM-4"), wheels=cal.get("wheels"),
+        strip_rows=tuple(cal["strip_rows"]) if "strip_rows" in cal else None,
+        wheel_template=np.load(d / "wheel_template.npy").astype(np.float32) if (d / "wheel_template.npy").exists() else None,
+        plates=cal.get("plates"), plate_models=tuple(d / n for n in extra if n.endswith(".onnx")),
         version=f"{sha8}+{build}+{cal['thresholds_id']}")

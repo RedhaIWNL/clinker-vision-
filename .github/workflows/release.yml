@@ -1,0 +1,63 @@
+# Release: publishing a version label (git tag v*, e.g. v2026.09.30) tests the code and builds the two
+# ready-made images the plant server downloads (deploy/server/cv-update):
+#   ghcr.io/redhaiwnl/clinker-vision-pipeline:<label>
+#   ghcr.io/redhaiwnl/clinker-vision-model:<label>      (includes the calibration bundles)
+# Make a label with tools/release.sh.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Go tests
+        # cam-1.mp4 is not in git (testdata/video is ignored)
+        run: go vet ./... && go test ./... -skip TestDecoderReadsCAM1Fixture
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Model tests (side-plate cameras and wheels; the old CAM-1 tests need recordings not in git)
+        working-directory: godet-damage-detector-model
+        run: |
+          pip install -r requirements.txt
+          python -m grpc_tools.protoc -Icontract --python_out=src/gen --grpc_python_out=src/gen contract/inference_v2.proto
+          python -m pytest -q tests/test_cam1new.py tests/test_cam3.py tests/test_cam4.py tests/test_wheels.py
+
+  images:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pipeline image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/pipeline.Dockerfile
+          push: true
+          tags: ghcr.io/redhaiwnl/clinker-vision-pipeline:${{ github.ref_name }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Model image
+        uses: docker/build-push-action@v6
+        with:
+          context: godet-damage-detector-model
+          push: true
+          tags: ghcr.io/redhaiwnl/clinker-vision-model:${{ github.ref_name }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}

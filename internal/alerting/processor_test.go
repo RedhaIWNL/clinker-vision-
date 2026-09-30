@@ -257,3 +257,35 @@ func TestEvidenceFallbackIsMarked(t *testing.T) {
 		t.Fatalf("fallback not marked: %#v", list.Alerts)
 	}
 }
+
+func TestWheelEventIsStoredAsGaletAlert(t *testing.T) {
+	root := t.TempDir()
+	alertStore := openProcessorStore(t, root)
+	strip := processorFrame() // stands for the strip picture the model hands back
+	strip.CameraID = "CAM-4"
+	g := &inferencev2.GodetState{GodetId: 113, LastSeenLoop: 2}
+	e := &inferencev2.GodetAlertEvent{EventKey: "CAM-4:WHEEL_GAP:113", Kind: "wheel_gap", GodetId: 113, LoopNo: 2, State: "confirmed",
+		EvidenceFrameId: strip.FrameID, EvidenceBox: &inferencev2.BoundingBox{X: 0.3, Y: 0, Width: 0.45, Height: 1},
+		Measurements: map[string]float64{"first_godet": 113, "last_godet": 119, "godets": 7, "wheels": 0}}
+	if _, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m4", Godets: []*inferencev2.GodetState{g}, Events: []*inferencev2.GodetAlertEvent{e}, Health: &inferencev2.Health{}}, strip, 85, filepath.Join(root, "evidence"), alertStore, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	list, err := alertStore.ListAlerts(context.Background(), store.ListFilter{Limit: 10})
+	if err != nil || len(list.Alerts) != 1 {
+		t.Fatalf("alerts=%#v err=%v", list, err)
+	}
+	a := list.Alerts[0]
+	if a.ObservationTarget != "galet" || a.FaultType != "WHEEL_GAP" || a.RuleID != "WHEEL_GAP" || a.GodetID != 113 {
+		t.Fatalf("wheel alert stored as %+v", a)
+	}
+	if !bytes.Contains([]byte(a.MeasurementsJSON), []byte(`"last_godet":119`)) || bytes.Contains([]byte(a.MeasurementsJSON), []byte(`"severity"`)) {
+		t.Fatalf("measurements = %s", a.MeasurementsJSON)
+	}
+	if a.BoundingBox.Width != 0.45 {
+		t.Fatalf("box = %+v", a.BoundingBox)
+	}
+	unknown := &inferencev2.GodetAlertEvent{EventKey: "X", Kind: "something_else", GodetId: 5, LoopNo: 1, State: "confirmed"}
+	if alerts, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m4", Godets: []*inferencev2.GodetState{{GodetId: 5}}, Events: []*inferencev2.GodetAlertEvent{unknown}, Health: &inferencev2.Health{}}, strip, 85, filepath.Join(root, "evidence"), alertStore, time.Now); err != nil || len(alerts) != 0 {
+		t.Fatalf("unknown kinds must be ignored: %v %v", alerts, err)
+	}
+}

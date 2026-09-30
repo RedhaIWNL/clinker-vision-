@@ -1,9 +1,12 @@
+# Images: on the plant server, deploy/server/cv-update sets CV_VERSION (in .env) to a release label and
+# downloads the ready-made images GitHub built for it (.github/workflows/release.yml). Without
+# CV_VERSION (a developer PC) the tag is "dev" and `docker compose build` builds them locally.
 services:
   pipeline:
     build:
       context: .
       dockerfile: deploy/pipeline.Dockerfile
-    image: ${PIPELINE_IMAGE:-clinker-vision-pipeline:rel-1}
+    image: ${PIPELINE_REPO:-ghcr.io/redhaiwnl/clinker-vision-pipeline}:${CV_VERSION:-dev}
     command: ["-config", "/etc/clinker-vision/config.yaml"]
     environment:
       # In-container listener must be 0.0.0.0 or Docker NAT to the container
@@ -33,8 +36,8 @@ services:
     build:
       context: ./godet-damage-detector-model
       dockerfile: Dockerfile
-    image: ${MODEL_IMAGE:-clinker-vision-model:rel-1}
-    command: ["python", "-m", "src.server", "--bind", "0.0.0.0:50051", "--bundle-dir", "/app/model", "--cam4-bundle-dir", "/app/model/cam4", "--store-path", "/app/state/store.db", "--model-build", "${MODEL_BUILD:-rel-1}"]
+    image: ${MODEL_REPO:-ghcr.io/redhaiwnl/clinker-vision-model}:${CV_VERSION:-dev}
+    command: ["python", "-m", "src.server", "--bind", "0.0.0.0:50051", "--bundle-dir", "/app/model", "--cam4-bundle-dir", "/app/model/cam4", "--sideplate-bundle-dir", "/app/model/cam3", "--sideplate-bundle-dir", "/app/model/cam1new", "--store-path", "/app/state/store.db", "--model-build", "${CV_VERSION:-dev}"]
     environment:
       # TEST-ONLY daylight smoke-test bypass (unset/0 = production behavior).
       # When 1, the model relaxes the template-lost self-test so a day feed
@@ -43,7 +46,7 @@ services:
     expose:
       - "50051"
     volumes:
-      - ./godet-damage-detector-model/model:/app/model:ro
+      # the calibration bundles are inside the image (/app/model): a version is code + models
       - ./model-state:/app/state
     read_only: true
     tmpfs:

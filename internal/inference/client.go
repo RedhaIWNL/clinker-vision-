@@ -375,6 +375,7 @@ func RequestFromFrame(frame ingest.Frame) (*inferencev2.InferenceRequest, error)
 // Tier-1 scalar keys every response of a camera must carry.
 var tier1RequiredScalars = map[string][]string{
 	"CAM-1": {"peak", "dx", "dy", "slot"},
+	"CAM-3": {"chain_step", "chain_pos", "match_quality", "chain_status"},
 	"CAM-4": {"chain_step", "chain_pos", "match_quality", "chain_status"},
 }
 
@@ -406,6 +407,11 @@ func ValidateResponseForCamera(expectedFrameID, cameraID string, response *infer
 	required, known := tier1RequiredScalars[cameraID]
 	if !known {
 		required = tier1RequiredScalars["CAM-1"]
+	}
+	// The re-aimed Camera 1 (2026-09-27) is served by the side-plate engine when its bundle is loaded;
+	// its responses carry the side-plate measurements instead of the old model's.
+	if _, sidePlate := response.GetScalarMeasurements()["chain_pos"]; cameraID == "CAM-1" && sidePlate {
+		required = tier1RequiredScalars["CAM-4"]
 	}
 	for _, name := range required {
 		if _, ok := response.GetScalarMeasurements()[name]; !ok {

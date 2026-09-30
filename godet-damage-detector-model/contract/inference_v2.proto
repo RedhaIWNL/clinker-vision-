@@ -112,7 +112,12 @@ message Health {
 message GodetAlertEvent {
   string event_key = 1;          // stable DAMAGE:<godet_id>:<loop> (CAM-1),
                                  // CAM-4:DAMAGE:<godet_id>:<loop> (CAM-4)
-  string kind = 2;              // damage (MVP)
+  // damage | wheel_gap | wheel_density | wheel_missing (wheel kinds: side-plate cameras,
+  // WHEELS_PLAN.md). Wheel keys: <cam>:WHEEL_GAP:<first godet>, <cam>:WHEEL_DENSITY:<first
+  // godet> (fixed chain pattern, raised once) and <cam>:WHEEL_MISSING:<godet>:<loop> (a change).
+  // Wheel measurements: first_godet, last_godet, godets, wheels. Their evidence frame is a
+  // picture of the unrolled chain handed back in retained_frames.
+  string kind = 2;
   int32 godet_id = 3;
   int32 loop_no = 4;
   string state = 5;              // pending | confirmed

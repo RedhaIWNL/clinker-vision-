@@ -45,6 +45,11 @@ STATUS_NAME = {READABLE: "readable", WEAK: "weak", EDGE: "edge", OCCLUDED: "occl
 # Fixed ROI indicator (2688x1520 CAM-1 night ROI). Identical on every indicator.
 FIXED_BOX = {"x": 0.3806, "y": 0.1158, "width": 0.0536, "height": 0.1697}
 
+# Missed-godet rule, as godet3/common.py + trigger.build_table.
+FPS = 25.0          # camera frame rate: frame positions -> seconds
+PERIOD_S = 0.8      # nominal godet period; only counts how many godets a gap hides
+GAP_MISS_S = 1.2    # a gap between captures longer than this hides at least one godet
+
 
 def _clahe(g):
     return cv2.createCLAHE(3.0, (8, 8)).apply(np.ascontiguousarray(g))
@@ -227,6 +232,14 @@ class StreamProcessor:
                 crop, mdx, mdy, mpeak, fpos = (prev["roi"], prev["dx"],
                                                prev["dy"], prev["peak"], self.pos - 1)
             if fpos - self.last_cap_pos > 12:  # min_sep, as batch
+                # godets the trigger could not read still take a slot, so the
+                # barcode stays in step with the master (batch build_table rule:
+                # a capture gap > 1.2 s hides round(gap / 0.8) - 1 godets).
+                if self.last_cap_pos >= 0:
+                    gap = (fpos - self.last_cap_pos) / FPS
+                    if gap > GAP_MISS_S:
+                        for _ in range(int(round(gap / PERIOD_S)) - 1):
+                            self.virtual_slot()
                 rec = self._measure(crop, mdx, mdy, mpeak, fpos,
                                     frame_id, sequence_no)
                 out.update(rec)

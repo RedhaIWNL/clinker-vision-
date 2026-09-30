@@ -1,0 +1,7 @@
+# Model image build context: service code, contract and calibration bundles only.
+.pytest_cache
+**/__pycache__
+tests
+tools
+examples
+docs

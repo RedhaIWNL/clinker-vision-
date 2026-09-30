@@ -720,7 +720,12 @@ type GodetAlertEvent struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	EventKey string                 `protobuf:"bytes,1,opt,name=event_key,json=eventKey,proto3" json:"event_key,omitempty"` // stable DAMAGE:<godet_id>:<loop> (CAM-1),
 	// CAM-4:DAMAGE:<godet_id>:<loop> (CAM-4)
-	Kind            string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"` // damage (MVP)
+	// damage | wheel_gap | wheel_density | wheel_missing (wheel kinds: side-plate cameras,
+	// WHEELS_PLAN.md). Wheel keys: <cam>:WHEEL_GAP:<first godet>, <cam>:WHEEL_DENSITY:<first
+	// godet> (fixed chain pattern, raised once) and <cam>:WHEEL_MISSING:<godet>:<loop> (a change).
+	// Wheel measurements: first_godet, last_godet, godets, wheels. Their evidence frame is a
+	// picture of the unrolled chain handed back in retained_frames.
+	Kind            string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
 	GodetId         int32                  `protobuf:"varint,3,opt,name=godet_id,json=godetId,proto3" json:"godet_id,omitempty"`
 	LoopNo          int32                  `protobuf:"varint,4,opt,name=loop_no,json=loopNo,proto3" json:"loop_no,omitempty"`
 	State           string                 `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"`                                              // pending | confirmed
