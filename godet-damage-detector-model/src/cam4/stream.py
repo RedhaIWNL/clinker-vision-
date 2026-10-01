@@ -39,6 +39,12 @@ RING = 4096                   # accumulation ring (columns); the slit writes ~20
 FINAL_MARGIN = 20             # a column is final once the slit is this far past it
 CTX = 1100                    # detector context each side (median filters over 5 pitches)
 BLOCK_COLS = 1000             # score in blocks of this many new columns
+# Lost pictures: the slit of the next picture that arrives is widened to cover the chain that moved past
+# meanwhile (2026-10-01: a lost picture left ~5 empty columns, the CAM-1 plate cutter took them for joints
+# and judged off-centre plates "out of line"). Widened by at most this much each side (~10 lost pictures).
+MAX_SLIT_HALF = 60
+ANCHOR_STEP = (-3.0, 80.0)    # a plausible chain step from the previous picture (px; ~8 lost pictures at most)
+AGREE_PX = 2.0                # longer comparisons must agree with the nearest one this closely
 
 
 def _grid(bundle, a_vals, b_vals):
@@ -167,6 +173,10 @@ class Cam4Stream:
         rows_b = np.arange(self.row0, self.row1) - bundle.slit_half
         self.sx, self.sy = _grid(bundle, self.A, rows_b)       # (rows, len(A))
         self.wts = (1 - np.abs(self.A) / 7.0).astype(np.float32)
+        self.rows_b = rows_b
+        self.wide = {}                 # half width -> (A, sx, sy, wts) of a widened slit
+        self.s_pasted = None           # chain position of the last pasted picture
+        self.h_pasted = 0              # and the half width of its slit
         H = self.row1 - self.row0
         self.acc = np.zeros((H, RING), np.float32)
         self.cnt = np.zeros(RING, np.float32)
@@ -189,7 +199,7 @@ class Cam4Stream:
         self.plate_sinks = []
         self.counters = {"frames_total": 0, "columns_total": 0, "stopped_frames_total": 0,
                          "weak_frames_total": 0, "gap_frames_total": 0, "empty_columns_total": 0,
-                         "repeated_frames_total": 0}
+                         "repeated_frames_total": 0, "widened_slits_total": 0, "missing_columns_total": 0}
         self.empty_recent = deque(maxlen=20)       # share of empty columns in the latest scored blocks
         self.last_jpeg = None
         self.arrivals = deque(maxlen=250)          # (wall time, repeated?) of the latest frames
@@ -201,7 +211,7 @@ class Cam4Stream:
         self.wheel_sinks.append(fn)
 
     def subscribe_plates(self, fn):
-        """New Camera 1: fn(cols, grey strip rows row0..row1 (n columns), row0) for the plate tracker."""
+        """New Camera 1: fn(cols, grey strip rows row0..row1 (n columns), row0, missing (n bool))."""
         self.plate_sinks.append(fn)
 
     # ---- per frame -------------------------------------------------------------------
@@ -229,7 +239,7 @@ class Cam4Stream:
     def on_gray(self, g, frame_id=None, sequence_no=None):
         patch = cv2.remap(g, self.ox, self.oy, cv2.INTER_LINEAR).astype(np.float32)
         i = self.idx
-        est, w, qual = [], [], 0.0
+        est, w, qual, anchor = [], [], 0.0, None
         for k in self.b.baselines:
             if i - k not in self.hist:
                 continue
@@ -239,6 +249,17 @@ class Cam4Stream:
                 qual = float(r)
             if r > 0.2 and abs(db) < 3:
                 est.append(s_prev + da); w.append(r * k)
+                if k == 1 and ANCHOR_STEP[0] < da < ANCHOR_STEP[1]:
+                    anchor = s_prev + da
+        if est:
+            # Lost pictures make "k pictures back" many frames back: those long comparisons are often wrong
+            # (2026-10-01, CAM-1 night: 1-4 frames apart <= 2 % wrong, 6-12 apart 4-11 % wrong yet trusted,
+            # each a jump of tens of px that tore the unrolled chain). The nearest picture is the reference;
+            # a longer comparison counts only if it agrees with it. Nothing lost: all agree, as before.
+            if anchor is None:
+                anchor = est[int(np.argmax(w))] if len(est) == 1 else float(np.median(est))
+            keep = [j for j, e in enumerate(est) if abs(e - anchor) <= AGREE_PX]
+            est, w = [est[j] for j in keep], [w[j] for j in keep]
         if self.s is None:
             s_new = 0.0
         elif est:
@@ -291,17 +312,38 @@ class Cam4Stream:
         return 0
 
     # ---- unrolled chain ---------------------------------------------------------------
+    def _slit(self, s):
+        """The bundle's slit, or a wider one when the chain moved further than it covers since the last
+        pasted picture (lost or repeated pictures): no column of the unrolled chain is left empty."""
+        A, sx, sy, wts = self.A, self.sx, self.sy, self.wts
+        half = min(int(-A[0]), int(A[-1]))
+        if self.s_pasted is None:
+            return A, sx, sy, wts
+        # this slit reaches back to s - h, the previous one forward to s_pasted + h_pasted: no column between
+        need = int(np.ceil(abs(s - self.s_pasted) - self.h_pasted)) + 1
+        if need <= half:
+            return A, sx, sy, wts
+        h = min(need, MAX_SLIT_HALF)
+        if h not in self.wide:
+            Aw = np.arange(-h, h + 1)
+            swx, swy = _grid(self.b, Aw, self.rows_b)
+            self.wide[h] = (Aw, swx, swy, (1 - np.abs(Aw) / (h + 1.0)).astype(np.float32))
+        self.counters["widened_slits_total"] += 1
+        return self.wide[h]
+
     def _paste(self, g, s, bad=False):
-        lines = cv2.remap(g, self.sx, self.sy, cv2.INTER_LINEAR).astype(np.float32)
-        cols = np.round(s - self.A).astype(int) + self.b.pad
+        A, sx, sy, wts = self._slit(s)
+        self.s_pasted, self.h_pasted = s, min(int(-A[0]), int(A[-1]))
+        lines = cv2.remap(g, sx, sy, cv2.INTER_LINEAR).astype(np.float32)
+        cols = np.round(s - A).astype(int) + self.b.pad
         lo = int(cols.min())
         self._finalise(lo - FINAL_MARGIN)
         for k, c in enumerate(cols):
             if c < self.next_final or c >= self.next_final + RING:
                 continue                                    # late write / wild jump: ignore
             j = c % RING
-            self.acc[:, j] += lines[:, k] * self.wts[k]
-            self.cnt[j] += self.wts[k]
+            self.acc[:, j] += lines[:, k] * wts[k]
+            self.cnt[j] += wts[k]
             self.bad[j] |= bad
 
     def _finalise(self, upto):
@@ -312,6 +354,7 @@ class Cam4Stream:
         cnt = self.cnt[idx]
         cols = self.acc[:, idx] / np.maximum(cnt, 1e-6)[None]
         missing = cnt == 0
+        self.counters["missing_columns_total"] += int(missing.sum())
         bad = self.bad[idx].copy()
         self.acc[:, idx] = 0; self.cnt[idx] = 0; self.bad[idx] = False
         self.fin = np.concatenate([self.fin, cols], 1)
@@ -338,7 +381,7 @@ class Cam4Stream:
                 for fn in self.sinks:
                     fn(cols, fp, zero, zero, miss)
                 for fn in self.plate_sinks:
-                    fn(cols, win[:, sl], self.row0)
+                    fn(cols, win[:, sl], self.row0, miss)
             elif self.mode == "neighbours":
                 fp, sev, top, empty = self._neighbour_block(win, a, cols)
                 self.counters["empty_columns_total"] += int(empty.sum())

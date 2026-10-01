@@ -96,25 +96,31 @@ class PlateTracker:
         self.pop = deque(maxlen=POPULATION)
         self.g = OrderedDict()                               # godet -> {"passes": deque, "state", ...}
         self.lock = threading.Lock()
+        self.miss = np.zeros(0, bool)                        # empty columns (no picture covered them)
         self.counters = {"plates_total": 0, "plates_estimated_joint_total": 0, "plates_unplaced_total": 0,
-                         "plate_godets_confirmed": 0}
+                         "plate_godets_confirmed": 0, "plates_skipped_missing_total": 0}
 
     # ---- input: scored strip columns (grey, rows row0..row1) -------------------------------------
-    def on_strip(self, cols, g, row0):
+    def on_strip(self, cols, g, row0, missing=None):
         if len(cols) == 0:
             return
         self.row0 = row0
         g = g.astype(np.float32)
+        missing = np.zeros(len(cols), bool) if missing is None else np.asarray(missing, bool)
         if self.buf is None or cols[0] != self.buf0 + self.buf.shape[1]:
             self.buf, self.buf0, self.edge, self.last_joint = g, int(cols[0]), np.zeros(0, np.float32), None
+            self.miss = missing.copy()
             # a stream restart numbers columns from 0 again: plates of the old numbering can never be cropped
             # and blocked every later plate (2026-09-29 replay: no plate scored after the second video)
             self.counters["plates_unplaced_total"] += len(self.pending)
             self.pending.clear(); self.prev = None
         else:
             self.buf = np.concatenate([self.buf, g], 1)
+            self.miss = np.concatenate([self.miss, missing])
         er = [r - row0 for r in self.c["edge_rows"]]
         self.edge = edge_signal(self.buf, er)                # recomputed on the buffer (edges need both sides)
+        if self.miss.any():                                  # an empty column is a black stripe, not a joint
+            self.edge[maximum_filter1d(self.miss.astype(np.uint8), 9) > 0] = 0.0
         c = self.c["dp"]
         if self.last_joint is None:
             self.last_joint = self.buf0 + int(np.argmax(self.edge[:400]))
@@ -131,7 +137,7 @@ class PlateTracker:
         self._score_pending()
         if self.buf.shape[1] > BUFFER:                       # keep what the next joints and crops need
             cut = self.buf.shape[1] - BUFFER
-            self.buf = self.buf[:, cut:]; self.buf0 += cut; self.edge = self.edge[cut:]
+            self.buf = self.buf[:, cut:]; self.buf0 += cut; self.edge = self.edge[cut:]; self.miss = self.miss[cut:]
 
     # ---- number, crop, score --------------------------------------------------------------------
     def _position(self, col):
@@ -165,6 +171,9 @@ class PlateTracker:
             self.prev = (godet, loop)
             x0 = cen - W // 2 - self.buf0
             if x0 < 0:
+                continue
+            if self.miss[x0:x0 + W].any():                   # part of this plate never seen: judged next loop
+                self.counters["plates_skipped_missing_total"] += 1
                 continue
             crop = np.clip(self.buf[r0:r1, x0:x0 + W], 0, 255)
             blob = ((crop / 255.0 - 0.45) / 0.25).astype(np.float32)

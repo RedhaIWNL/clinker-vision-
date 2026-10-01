@@ -129,6 +129,18 @@ button,select,input{font:inherit;color:var(--text)}
 .limits input{width:58px;text-align:center}
 .limits .hint{font-size:11px;color:var(--dim);margin:2px 0 8px}
 .limits .btn{width:100%;justify-content:center}
+.hours{border:1px solid var(--line);border-radius:3px;background:var(--bg0);margin-top:10px}
+.hours summary{cursor:pointer;padding:8px 10px;font-size:12px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.hours .body{padding:0 10px 10px}
+.hours .cam{border-top:1px solid var(--line);padding:8px 0}
+.hours .cam b{font-size:13px}
+.hours select{width:100%;margin:4px 0;font-size:12px;min-width:0}
+.hours .tm{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.hours .tm input{width:100%;min-width:0;font-size:12px;padding:4px 2px;box-sizing:border-box}
+.hours .st{font-size:11px;color:var(--dim);margin-top:3px}
+.hours .warn{font-size:12px;color:var(--red);margin:6px 0}
+.hours .hint{font-size:11px;color:var(--dim);margin:6px 0}
+.hours .btn{width:100%;justify-content:center}
 .hiddenn{padding:6px 12px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
 .dtype{display:inline-block;margin-left:6px;padding:0 6px;border-radius:3px;font-size:11px;font-weight:650;letter-spacing:.04em;background:#F6E3E4;color:var(--red)}
 .dtype.wheel{background:#F5EBD9;color:var(--amber)}
@@ -165,6 +177,12 @@ button,select,input{font:inherit;color:var(--text)}
 <button class="btn ack" id="lim-save">Save limits</button>
 <div class="hint" id="lim-note" style="margin-top:8px">Applies from the next chain loop (about 16 minutes). Alerts inside the limits are hidden.</div>
 </div>
+<details class="hours" id="hours" hidden><summary>Camera hours</summary><div class="body">
+<div class="hint">When each camera runs. The server handles one camera at a time: avoid overlapping hours. Applies within 15 seconds, no restart.</div>
+<div id="hours-cams"></div>
+<div class="warn" id="hours-warn" hidden></div>
+<button class="btn ack" id="hours-save">Save hours</button>
+</div></details>
 <p class="note" id="healthnote"></p>
 </nav>
 <section class="alarms" aria-label="Alarm list">
@@ -254,7 +272,7 @@ store.first=false;renderAll();if(fresh>0)toast(fresh+" new alarm"+(fresh===1?"":
 }catch(e){toast("Alarm list: "+(e.message||e),"error");}}
 function saveHash(){try{history.replaceState(null,"","#cam="+encodeURIComponent(store.camera||"")+"&view="+(store.kind==="galet"?"wheels":"godets"));}catch(e){}}
 (function readHash(){const h=new URLSearchParams(location.hash.slice(1));if(h.get("cam"))store.camera=h.get("cam");if(h.get("view")==="wheels")store.kind="galet";})();
-function renderAll(){renderCams();counts();renderHealth();saveHash();
+function renderAll(){renderCams();counts();renderHealth();renderHoursStatus();saveHash();
 document.querySelectorAll(".kinds button").forEach(x=>x.setAttribute("aria-selected",String(x.getAttribute("data-kind")===store.kind)));
 $("limits").hidden=store.kind!=="galet";
 const v=visible();if(!store.selected||!v.some(a=>a.alert_id===store.selected))store.selected=v.length?v[0].alert_id:null;
@@ -303,11 +321,36 @@ async function acknowledge(id,btn){btn.disabled=true;try{const r=await fetch("/a
 const d=await r.json(),a=store.items.get(id);if(a)a.seen_at=d.seen_at;renderAll();toast("Alarm acknowledged.");}catch(e){btn.disabled=false;toast("Acknowledge failed: "+(e.message||e),"error");}}
 /* ---- wheel limits ---- */
 async function loadLimits(){try{const r=await fetch("/api/v1/settings");if(!r.ok)return;store.limits=await r.json();
-$("lim-max").value=store.limits.wheel_max_gap_godets;$("lim-min").value=store.limits.wheel_min_spacing_godets;renderAll();}catch(e){}}
+$("lim-max").value=store.limits.wheel_max_gap_godets;$("lim-min").value=store.limits.wheel_min_spacing_godets;renderHours(store.limits);renderAll();}catch(e){}}
 $("lim-save").addEventListener("click",async()=>{const body={wheel_max_gap_godets:Number($("lim-max").value),wheel_min_spacing_godets:Number($("lim-min").value)};
 try{const r=await fetch("/api/v1/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const d=await r.json();if(!r.ok)throw new Error(d.error||d.message||("HTTP "+r.status));store.limits=d;renderAll();
 toast("Limits saved: the model uses them from the next chain loop (about 16 minutes).");}catch(e){toast("Limits not saved: "+(e.message||e),"error");}});
+/* ---- camera hours ---- */
+function renderHours(d){if(!d||!d.cameras||!d.cameras.length){$("hours").hidden=true;return;}$("hours").hidden=false;
+const set=d.camera_hours||{};
+$("hours-cams").innerHTML=d.cameras.map(c=>{const h=set[c.id],m=h?h.mode:"config",cf=c.config_hours||{},src=h&&h.mode==="hours"?h:(cf.mode==="hours"?cf:{start:"",stop:""});
+const cfText=cf.mode==="hours"?cf.start+" - "+cf.stop:"always on";
+return '<div class="cam" data-cam="'+esc(c.id)+'"><b>'+esc(c.id)+'</b>'+
+'<select class="hm"><option value="config"'+(m==="config"?" selected":"")+'>Default ('+esc(cfText)+')</option>'+
+'<option value="hours"'+(m==="hours"?" selected":"")+'>These hours</option><option value="always"'+(m==="always"?" selected":"")+'>Always on</option>'+
+'<option value="off"'+(m==="off"?" selected":"")+'>Off</option></select>'+
+'<div class="tm"><input class="hs" type="time" value="'+esc(src.start||"")+'" aria-label="'+esc(c.id)+' start"><input class="he" type="time" value="'+esc(src.stop||"")+'" aria-label="'+esc(c.id)+' stop"></div>'+
+'<div class="st"></div></div>';}).join("");
+document.querySelectorAll("#hours-cams .cam").forEach(el=>{const sync=()=>{const on=el.querySelector(".hm").value==="hours";el.querySelectorAll(".tm input").forEach(i=>i.disabled=!on);};
+el.querySelector(".hm").addEventListener("change",sync);sync();});
+const w=d.overlaps||[];$("hours-warn").hidden=!w.length;$("hours-warn").textContent=w.length?"Overlapping hours: "+w.join(", ")+". Both cameras will run at once and may lose frames.":"";
+renderHoursStatus();}
+function renderHoursStatus(){document.querySelectorAll("#hours-cams .cam").forEach(el=>{const c=camStatus(el.getAttribute("data-cam"));
+el.querySelector(".st").textContent=c?("Now: "+(c.status==="standby"?"off":"running")+(c.status==="standby"&&c.detail?" ("+c.detail+")":"")):"";});}
+$("hours-save").addEventListener("click",async()=>{const ch={};let bad="";
+document.querySelectorAll("#hours-cams .cam").forEach(el=>{const id=el.getAttribute("data-cam"),m=el.querySelector(".hm").value;
+if(m==="config"){ch[id]=null;return;}const h={mode:m};if(m==="hours"){h.start=el.querySelector(".hs").value;h.stop=el.querySelector(".he").value;
+if(!h.start||!h.stop)bad=id+": set a start and a stop time.";}ch[id]=h;});
+if(bad){toast("Hours not saved: "+bad,"error");return;}
+try{const r=await fetch("/api/v1/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({camera_hours:ch})});
+const d=await r.json();if(!r.ok)throw new Error(d.error||d.message||("HTTP "+r.status));renderHours(d);
+toast("Hours saved: cameras start or stop within 15 seconds.");setTimeout(pollStatus,16000);}catch(e){toast("Hours not saved: "+(e.message||e),"error");}});
 /* ---- controls ---- */
 document.querySelectorAll("#shows button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll("#shows button").forEach(x=>x.setAttribute("aria-selected","false"));b.setAttribute("aria-selected","true");store.show=b.getAttribute("data-show");store.selected=null;renderAll();}));
 document.querySelectorAll(".kinds button").forEach(b=>b.addEventListener("click",()=>{store.kind=b.getAttribute("data-kind");store.selected=null;renderAll();}));
