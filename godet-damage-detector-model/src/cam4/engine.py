@@ -43,6 +43,14 @@ RETAIN_BLOCK = 80            # columns per retention block (half a plate)
 RETAIN_REACH = 120           # a retained frame serves spots within this many columns
 RETAIN_FACTOR = 0.75         # retain at 75 % of the pass alarm (relative), generous on purpose
 RETAIN_MIN_BLOCKS = 200      # block peaks needed before the retention threshold is trusted
+# New Camera 1: a plate is judged only once the chain map has placed it, thousands of columns after
+# the camera saw it (joints committed 700 columns late, then the next map anchor); the ring above has
+# dropped its frames by then and every CAM-1 alert went out without its picture (2026-09-30: 0 of 109),
+# drawn by the pipeline with the old CAM-1 fixed box. A sparse ring keeps one frame per FAR_BUCKET px
+# further back; a plate is visible anywhere within ~1300 px of the slit, so the nearest serves.
+FAR_BUCKET = 400.0
+FAR_MAX = 40                 # 16,000 px of chain (~1.7 minutes at CAM-1 speed), ~27 MB of JPEG
+FAR_REACH = 700              # px: the plate stays well inside the 2688 px frame
 RETAINED_MAX = 4000          # retained-frame index kept for evidence lookup (no JPEG bytes)
 OUTBOX_PER_RESPONSE = 2      # retained JPEGs attached per Tier-1 response (message size)
 
@@ -68,6 +76,7 @@ class Cam4Engine:
         self.ever_locked = False
         # evidence
         self.ring = OrderedDict()           # bucket -> frame record (with JPEG)
+        self.far = OrderedDict()            # sparse, further back (new Camera 1 plate evidence)
         self.retained = OrderedDict()       # frame_id -> frame record (without JPEG)
         self.outbox = deque()               # frame records (with JPEG) to hand back
         self.block_peaks = deque(maxlen=2 * self.n)
@@ -109,6 +118,7 @@ class Cam4Engine:
             self.plates.ident = self.ident
             self.stream.subscribe_plates(self.plates.on_strip)
         self.ring.clear()
+        self.far.clear()
 
     # ---- sequencing lane (same policy as CAM-1: reorder window 64, gaps declared) -----
     def sequence(self, req, release):
@@ -166,8 +176,15 @@ class Cam4Engine:
     def _remember(self, jpeg, frame_id, sequence_no, captured_at, s):
         key = int(s // RING_BUCKET)
         self.ring.pop(key, None)
-        self.ring[key] = {"frame_id": frame_id, "sequence_no": int(sequence_no or 0),
-                          "captured_at": captured_at, "s": float(s), "jpeg": jpeg}
+        rec = {"frame_id": frame_id, "sequence_no": int(sequence_no or 0),
+               "captured_at": captured_at, "s": float(s), "jpeg": jpeg}
+        self.ring[key] = rec
+        if self.plates is not None:
+            far = int(s // FAR_BUCKET)
+            if far not in self.far:
+                self.far[far] = rec
+                while len(self.far) > FAR_MAX:
+                    self.far.popitem(last=False)
         oldest_needed = self.stream.done - self.b.pad - RING_KEEP_BEHIND
         while self.ring:
             k, rec = next(iter(self.ring.items()))
@@ -190,6 +207,10 @@ class Cam4Engine:
         """New Camera 1: keep the frame that shows the plate at this chain column; evidence for its alert."""
         rec = self._nearest(self.ring.values(), int(col))
         if rec is None:
+            target = int(col) - self.b.pad
+            near = [r for r in self.far.values() if abs(r["s"] - target) <= FAR_REACH]
+            rec = min(near, key=lambda r: abs(r["s"] - target)) if near else None
+        if rec is None:
             return None
         with self.lock:
             if rec["frame_id"] not in self.retained:
@@ -199,10 +220,14 @@ class Cam4Engine:
                 self.outbox.append(rec)
                 self.counters["retained_frames_total"] += 1
         a = rec["s"] - (col - self.b.pad)
-        bb = self.b.plates["spot_row"] - self.b.slit_half
-        x, y = self.b.p0 + a * self.b.u + bb * self.b.v
-        W, H = self.b.frame_size; h = 1.4 * EVIDENCE_HALF
-        x0, y0, x1, y1 = max(0.0, x - h), max(0.0, y - h), min(W, x + h), min(H, y + h)
+        # the box is the plate the models judged: crop_w columns along the chain, strip rows "rows"
+        pr0, pr1 = self.b.plates["rows"]
+        hw = self.b.plates["crop_w"] / 2
+        corners = [self.b.p0 + (a + du) * self.b.u + (r - self.b.slit_half) * self.b.v
+                   for du in (-hw, hw) for r in (pr0, pr1)]
+        W, H = self.b.frame_size
+        xs, ys = [c[0] for c in corners], [c[1] for c in corners]
+        x0, y0, x1, y1 = max(0.0, min(xs)), max(0.0, min(ys)), min(W, max(xs)), min(H, max(ys))
         ts = rec["captured_at"]
         return {"frame_id": rec["frame_id"], "box": [x0 / W, y0 / H, (x1 - x0) / W, (y1 - y0) / H],
                 "captured_at": None if ts is None else [int(ts.seconds), int(ts.nanos)]}
@@ -379,7 +404,12 @@ class Cam4Engine:
         s = self.stream
         quals = list(s.quals)
         lines = []
-        if s.chain_status() == 2:
+        arr = s.arrival()
+        losing = arr is not None and (arr[1] > 0.2 or arr[0] < 20)
+        if losing:      # checked before "stopped": lost frames looked like a stopped chain (2026-09-30)
+            lines.append(f"CAMERA STREAM LOSING FRAMES: {min(arr[0], 99):.0f} frames/s arrive (25 expected), "
+                         f"{arr[1]:.0%} repeated pictures - the server is too busy (do camera hours overlap?)")
+        if s.chain_status() == 2 and not (arr is not None and arr[1] > 0.2):
             lines.append("conveyor stopped")
         if s.empty_share() > 0.5:
             lines.append("conveyor empty: plates not judged")
@@ -412,6 +442,9 @@ class Cam4Engine:
             items["evidence_buffer_frames"] = len(self.ring)
             items["evidence_outbox_frames"] = len(self.outbox)
         items.update({f"stream_{k}": v for k, v in s.counters.items()})
+        if arr is not None:
+            items["stream_frames_per_second"] = round(min(arr[0], 999.0), 1)
+            items["stream_repeated_share"] = round(arr[1], 3)
         items.update({f"identity_{k}": v for k, v in self.ident.counters.items()})
         items["godets_confirmed"] = sum(v["state"] == "confirmed" for v in self.hist.g.values())
         items["godets_suspect"] = sum(v["state"] == "suspect" for v in self.hist.g.values())

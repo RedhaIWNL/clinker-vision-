@@ -43,11 +43,14 @@ services:
       # When 1, the model relaxes the template-lost self-test so a day feed
       # flows through the stack. Detections/alerts in this mode are MEANINGLESS.
       - SMOKE_TEST_RELAX_TEMPLATE=${SMOKE_TEST_RELAX_TEMPLATE:-0}
+      # wheel alert limits set in the web page (written by the pipeline, read at each evaluation)
+      - CV_SETTINGS=/app/pipeline-data/settings.json
     expose:
       - "50051"
     volumes:
       # the calibration bundles are inside the image (/app/model): a version is code + models
       - ./model-state:/app/state
+      - ./data:/app/pipeline-data:ro
     read_only: true
     tmpfs:
       - /tmp

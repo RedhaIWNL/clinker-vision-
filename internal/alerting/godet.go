@@ -36,21 +36,23 @@ func EventKey(cameraID string, godetID, loop int32) string {
 	return fmt.Sprintf("%s:DAMAGE:%d:%d", cameraID, godetID, loop)
 }
 
-// eventBox is the box drawn on the evidence: the event's own fault-spot box when the
-// model sends one (CAM-4), else CAM-1's fixed ROI indicator.
-func eventBox(event *inferencev2.GodetAlertEvent) evidence.BoundingBox {
+// eventBox is the box drawn on the evidence: the event's own fault-spot box when the model sends
+// one (side-plate cameras, wheels), else, for the old CAM-1 lip model only, its fixed ROI indicator.
+// A side-plate or wheel event without a box gets no box: the old fixed box sat on the roof of the
+// re-aimed Camera 1 view (2026-09-30).
+func eventBox(event *inferencev2.GodetAlertEvent, legacy bool) (evidence.BoundingBox, bool) {
 	b := event.GetEvidenceBox()
 	if b == nil || b.GetWidth() <= 0 || b.GetHeight() <= 0 {
-		return fixedGodetBox
+		return fixedGodetBox, legacy
 	}
 	x := clamp01(float64(b.GetX()))
 	y := clamp01(float64(b.GetY()))
 	w := math.Min(float64(b.GetWidth()), 1-x)
 	h := math.Min(float64(b.GetHeight()), 1-y)
 	if w <= 0 || h <= 0 {
-		return fixedGodetBox
+		return fixedGodetBox, legacy
 	}
-	return evidence.BoundingBox{X: float32(x), Y: float32(y), Width: float32(w), Height: float32(h)}
+	return evidence.BoundingBox{X: float32(x), Y: float32(y), Width: float32(w), Height: float32(h)}, true
 }
 
 func clamp01(v float64) float64 {
@@ -155,8 +157,15 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	if err != nil {
 		return nil, err
 	}
-	box := eventBox(event)
-	jpegData, err := evidence.RenderJPEGWithBoxes(frame.ImageData, []evidence.BoxOverlay{{FaultType: kind.fault, BoundingBox: box}}, quality)
+	_, sidePlate := event.GetMeasurements()["severity"] // side-plate damage events carry a severity
+	box, drawn := eventBox(event, kind.target == "godet" && !sidePlate)
+	var overlays []evidence.BoxOverlay
+	if drawn {
+		overlays = []evidence.BoxOverlay{{FaultType: kind.fault, BoundingBox: box}}
+	} else {
+		box = evidence.BoundingBox{Width: 1, Height: 1} // stored as the whole frame (the store needs a box); not drawn
+	}
+	jpegData, err := evidence.RenderJPEGWithBoxes(frame.ImageData, overlays, quality)
 	if err != nil {
 		return nil, fmt.Errorf("render godet evidence: %w", err)
 	}

@@ -2,10 +2,13 @@ package main
 
 import (
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/clinkervision/clinker-vision/internal/config"
 	"github.com/clinkervision/clinker-vision/internal/health"
 )
 
@@ -78,4 +81,48 @@ func TestWindowReportPathsCAM3(t *testing.T) {
 	if rep != filepath.Join("/srv/clinker-vision/data", "reports", "CAM-3-day-2026-09-28.md") {
 		t.Fatalf("CAM-3 report = %q", rep)
 	}
+}
+
+func TestCameraHoursFromPage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	cam := config.CameraConfig{ID: "CAM-1", Enabled: true,
+		Schedule: &config.ScheduleConfig{Enabled: true, Start: "16:00", Stop: "09:00", Timezone: "Africa/Casablanca"}}
+	e := &laneEnv{loc: time.UTC, settingsPath: path}
+	if s, off, page := e.cameraHours(cam); off || page || s.Start != "16:00" {
+		t.Fatalf("no page hours: config.yaml expected, got %+v off=%v page=%v", s, off, page)
+	}
+	write := func(body string) {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"wheel_max_gap_godets":4,"wheel_min_spacing_godets":3,"camera_hours":{"CAM-1":{"mode":"off"}}}`)
+	if on, detail := e.inWindow(cam); on || !strings.Contains(detail, "switched off") {
+		t.Fatalf("off: %v %q", on, detail)
+	}
+	write(`{"wheel_max_gap_godets":4,"wheel_min_spacing_godets":3,"camera_hours":{"CAM-1":{"mode":"always"}}}`)
+	if on, _ := e.inWindow(cam); !on {
+		t.Fatal("always on must run")
+	}
+	now := time.Now().In(mustLoc(t, "Africa/Casablanca"))
+	in := now.Add(-time.Hour).Format("15:04") // a window around now, and one that ended an hour ago
+	out := now.Add(-2 * time.Hour).Format("15:04")
+	write(`{"wheel_max_gap_godets":4,"wheel_min_spacing_godets":3,"camera_hours":{"CAM-1":{"mode":"hours","start":"` + in + `","stop":"` + now.Add(time.Hour).Format("15:04") + `"}}}`)
+	if on, detail := e.inWindow(cam); !on {
+		t.Fatalf("inside page hours: %q", detail)
+	}
+	write(`{"wheel_max_gap_godets":4,"wheel_min_spacing_godets":3,"camera_hours":{"CAM-1":{"mode":"hours","start":"` + out + `","stop":"` + in + `"}}}`)
+	if on, detail := e.inWindow(cam); on || !strings.Contains(detail, "camera hours panel") {
+		t.Fatalf("outside page hours: %v %q", on, detail)
+	}
+}
+
+func mustLoc(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loc
 }

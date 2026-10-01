@@ -66,6 +66,33 @@ right-click each one and choose **Allow Launching**.
 
 If the setup says Docker may not be used: `sudo usermod -aG docker $USER`, log out and in, run it again.
 
+## One camera at a time
+
+This server (6 cores) cannot run CAM-1, CAM-3 and CAM-4 at 25 frames/s together: each would get about
+5 frames/s and the model would read the chain as stopped (2026-09-30). Their hours must not overlap:
+
+```bash
+sudo bash ~/Projects/clinker-vision-/deploy/server/cv-schedule
+```
+
+sets CAM-3 09:00-12:30, CAM-4 12:30-16:00, CAM-1 16:00-09:00 (backup of the settings in `backups/`)
+and restarts the pipeline. **Repair** warns when hours overlap. If frames are lost anyway, Status says
+`CAMERA STREAM LOSING FRAMES` (not "conveyor stopped").
+
+**Easier (from version 2026.10.01): the Viewer's *Camera hours* box** (left column, below the godet
+number). For each camera: *Default* (the hours above, from `config.yaml`), *These hours* (start / stop,
+may pass midnight), *Always on* or *Off*. **Save hours**: cameras start or stop within 15 seconds, no
+restart, nothing to type in a terminal. The box warns when two cameras' hours overlap. *Default* again
+returns a camera to its `config.yaml` hours. Only cameras enabled in `config.yaml` are listed.
+Example, to try CAM-1 now: CAM-1 *Always on*, CAM-3 and CAM-4 *Off*; afterwards all three back to
+*Default*.
+
+## Wheel alert limits
+
+In the Viewer, **Wheels** view, box *Wheel alert limits*: the maximum godets in a row without a wheel
+(default 4) and the minimum spacing between two wheels (default 3). Save: the model uses them from the
+next chain loop (about 16 minutes); alarms inside the limits are hidden.
+
 ## Changing which cameras run
 
 Still done in `config/config.yaml` (see `RUN-CAM4.md` sections 4, 4b, 4c). The file holds the camera

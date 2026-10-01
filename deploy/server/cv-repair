@@ -180,6 +180,36 @@ if { [ -n "$MODEL_OOM" ] || [ "${enabled_cams:-0}" -ge 3 ]; } && [ "$ram_gb" -ge
   if grep -q '^MODEL_MEMORY_LIMIT=' .env; then sed -i 's|^MODEL_MEMORY_LIMIT=.*|MODEL_MEMORY_LIMIT=4g|' .env; else echo "MODEL_MEMORY_LIMIT=4g" >> .env; fi
   ok "model memory raised to 4 GB (server has $ram_gb GB; ${enabled_cams:-?} cameras on)"
 else ok "memory: server $ram_gb GB, model limit ${lim:-2g}"; fi
+cores="$(nproc)"; cpus="$(sed -n 's/^MODEL_CPUS=//p' .env | tail -1)"
+if [ -z "$cpus" ] && [ "$cores" -ge 6 ]; then        # one worker per camera: leave 2 cores to the pipeline
+  echo "MODEL_CPUS=$((cores - 2 > 4 ? 4 : cores - 2))" >> .env
+  ok "model may use $((cores - 2 > 4 ? 4 : cores - 2)) of the $cores processor cores"
+else ok "processor: $cores cores, model limit ${cpus:-2}"; fi
+# cameras whose hours overlap run together: this server cannot carry that at 25 frames/s (2026-09-30)
+overlap="$(python3 - config/config.yaml <<'EOF'
+import re, sys
+cams, cam, sched = {}, None, False
+for line in open(sys.argv[1]):
+    if re.match(r"[^\s#]", line): cam = None; continue
+    m = re.match(r"\s*-\s*id:\s*\"?([^\"\s]+)", line)
+    if m: cam = m.group(1); cams[cam] = {"on": False}; sched = False; continue
+    if cam is None: continue
+    if re.match(r"\s*schedule:", line): sched = True
+    if not sched and re.match(r"\s*enabled:\s*true", line): cams[cam]["on"] = True
+    m = re.match(r"\s*(start|stop):\s*\"?(\d\d):(\d\d)", line)
+    if sched and m: cams[cam][m.group(1)] = int(m.group(2)) * 60 + int(m.group(3))
+def minutes(c):
+    a, b = c.get("start", 0), c.get("stop", 0)
+    return set(range(a, b)) if a < b else set(range(a, 1440)) | set(range(0, b))
+on = {k: minutes(v) for k, v in cams.items() if v["on"]}
+names = sorted(on)
+pairs = [f"{x}+{y}" for i, x in enumerate(names) for y in names[i + 1:] if on[x] & on[y]]
+print(" ".join(pairs))
+EOF
+)"
+if [ -n "$overlap" ]; then
+  warn "camera hours overlap ($overlap): those cameras run at the same time, which this server cannot carry. Fix: sudo bash $DIR/deploy/server/cv-schedule"
+else ok "camera hours do not overlap: one camera at a time"; fi
 missing=""
 for i in $(docker compose config --images 2>/dev/null); do docker image inspect "$i" >/dev/null 2>&1 || missing=1; done
 if [ -n "$missing" ]; then

@@ -221,6 +221,7 @@ type laneEnv struct {
 	dependencyTO   time.Duration
 	requestTimeout time.Duration
 	statePoll      time.Duration
+	settingsPath   string // the web page's settings (camera hours); empty = config.yaml only
 	readyMu        sync.Mutex
 	ready          map[string]bool // camera -> ready, for cameras inside their window
 }
@@ -402,25 +403,12 @@ func (e *laneEnv) supervise(parent context.Context) {
 }
 
 func (e *laneEnv) superviseCamera(parent context.Context, camera config.CameraConfig) {
-	schedule := e.cfg.ScheduleFor(camera)
 	tracker := newWindowTracker()
-	if !schedule.Enabled {
-		tracker.reset(time.Now(), 0)
-		e.runCamera(parent, camera, schedule, tracker, false)
-		return
-	}
-	loc := e.loc
-	if schedule.Timezone != "" {
-		if loaded, err := time.LoadLocation(schedule.Timezone); err == nil {
-			loc = loaded
-		}
-	}
 	idleLogged := false
 	for parent.Err() == nil {
-		if !schedule.Contains(time.Now().In(loc)) {
+		on, detail := e.inWindow(camera)
+		if !on {
 			e.setCameraReady(camera.ID, false, false)
-			detail := fmt.Sprintf("outside operating window %s-%s %s",
-				schedule.Start, schedule.Stop, schedule.Timezone)
 			e.status.UpdateCamera(camera.ID, func(s *web.ModelStatus) {
 				s.Ready = false
 				s.LoopLocked = false
@@ -431,14 +419,69 @@ func (e *laneEnv) superviseCamera(parent context.Context, camera config.CameraCo
 				e.logger.Info("camera idle outside operating window", "component", "pipeline", "camera_id", camera.ID, "detail", detail)
 				idleLogged = true
 			}
-			if !sleepOrDone(parent, 30*time.Second) {
+			if !sleepOrDone(parent, 15*time.Second) {
 				return
 			}
 			continue
 		}
 		idleLogged = false
-		e.runCamera(parent, camera, schedule, tracker, true)
+		schedule, _, _ := e.cameraHours(camera)
+		e.runCamera(parent, camera, schedule, tracker, schedule.Enabled)
 	}
+}
+
+// cameraHours is the camera's operating window: the hours set on the web page's camera hours panel
+// (read from the settings file each time, so a change applies within 15 s without a restart), else
+// its hours in config.yaml. off: switched off on the page.
+func (e *laneEnv) cameraHours(camera config.CameraConfig) (schedule config.ScheduleConfig, off bool, fromPage bool) {
+	base := e.cfg.ScheduleFor(camera)
+	if e.settingsPath == "" {
+		return base, false, false
+	}
+	h, ok := web.LoadSettings(e.settingsPath).CameraHours[camera.ID]
+	if !ok {
+		return base, false, false
+	}
+	tz := base.Timezone
+	if tz == "" {
+		tz = e.cfg.Schedule.Timezone
+	}
+	if tz == "" {
+		tz = "Africa/Casablanca"
+	}
+	switch h.Mode {
+	case "off":
+		return base, true, true
+	case "always":
+		return config.ScheduleConfig{Enabled: false, Timezone: tz}, false, true
+	default:
+		return config.ScheduleConfig{Enabled: true, Start: h.Start, Stop: h.Stop, Timezone: tz}, false, true
+	}
+}
+
+// inWindow: should the camera run now; when not, the reason shown on the page.
+func (e *laneEnv) inWindow(camera config.CameraConfig) (bool, string) {
+	schedule, off, fromPage := e.cameraHours(camera)
+	if off {
+		return false, "switched off on the camera hours panel"
+	}
+	if !schedule.Enabled {
+		return true, ""
+	}
+	loc := e.loc
+	if schedule.Timezone != "" {
+		if loaded, err := time.LoadLocation(schedule.Timezone); err == nil {
+			loc = loaded
+		}
+	}
+	if schedule.Contains(time.Now().In(loc)) {
+		return true, ""
+	}
+	source := "config.yaml"
+	if fromPage {
+		source = "camera hours panel"
+	}
+	return false, fmt.Sprintf("outside operating window %s-%s %s (%s)", schedule.Start, schedule.Stop, schedule.Timezone, source)
 }
 
 // runCamera builds a fresh lane for one camera, runs it until parent is done (or, for a
@@ -534,9 +577,7 @@ func (e *laneEnv) runCamera(parent context.Context, camera config.CameraConfig, 
 		defer runtimeWG.Done()
 		e.pollState(laneCtx, runtime, tracker)
 	}()
-	if scheduled {
-		go e.watchWindow(laneCtx, laneCancel, camera, schedule)
-	}
+	go e.watchWindow(laneCtx, laneCancel, camera)
 	<-laneCtx.Done()
 	runtime.queue.Close()
 	runtimeWG.Wait()
@@ -732,8 +773,8 @@ func (e *laneEnv) pollState(laneCtx context.Context, runtime *cameraRuntime, tra
 	}
 }
 
-// watchWindow ends the camera's lane when its operating window closes.
-func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.CancelFunc, camera config.CameraConfig, schedule config.ScheduleConfig) {
+// watchWindow ends the camera's lane when its operating window closes or it is switched off on the page.
+func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.CancelFunc, camera config.CameraConfig) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -741,8 +782,8 @@ func (e *laneEnv) watchWindow(laneCtx context.Context, laneCancel context.Cancel
 		case <-laneCtx.Done():
 			return
 		case <-ticker.C:
-			if !schedule.Contains(time.Now().In(e.loc)) {
-				e.logger.Info("operating window closed; stopping lane", "component", "pipeline", "camera_id", camera.ID)
+			if on, detail := e.inWindow(camera); !on {
+				e.logger.Info("operating window closed; stopping lane", "component", "pipeline", "camera_id", camera.ID, "detail", detail)
 				laneCancel()
 				return
 			}
@@ -834,9 +875,22 @@ func main() {
 	}
 	defer modelClient.Close()
 	statusStore := web.NewStatusStore()
+	webAPI := web.NewAPI(alertStore, cfg.Storage.EvidencePath)
+	// next to the alerts database: the model reads it through the shared data folder (docker-compose.yml)
+	webAPI.SettingsPath = filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "settings.json")
+	for _, camera := range cfg.Cameras {
+		if !camera.Enabled {
+			continue
+		}
+		info := web.CameraInfo{ID: camera.ID, ConfigHours: web.CameraHours{Mode: "always"}}
+		if sch := cfg.ScheduleFor(camera); sch.Enabled && sch.Start != sch.Stop {
+			info.ConfigHours = web.CameraHours{Mode: "hours", Start: sch.Start, Stop: sch.Stop}
+		}
+		webAPI.Cameras = append(webAPI.Cameras, info)
+	}
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Server.BindAddress, cfg.Server.WebPort),
-		Handler:           web.NewHandler(healthHandler, metricHandler, web.NewAPI(alertStore, cfg.Storage.EvidencePath), statusStore),
+		Handler:           web.NewHandler(healthHandler, metricHandler, webAPI, statusStore),
 		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 
@@ -874,6 +928,7 @@ func main() {
 	env := &laneEnv{
 		cfg: cfg, logger: logger, health: healthHandler, metrics: metricHandler,
 		status: statusStore, store: alertStore, model: modelClient, loc: loc,
+		settingsPath:   webAPI.SettingsPath,
 		reportFatal:    reportFatal,
 		dependencyTO:   dependencyTimeout,
 		requestTimeout: time.Duration(cfg.Model.RequestTimeoutSeconds) * time.Second,

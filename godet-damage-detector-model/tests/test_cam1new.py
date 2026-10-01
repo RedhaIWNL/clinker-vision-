@@ -111,3 +111,38 @@ def test_night_video_locks_and_judges_plates():
     assert eng.wheels.counters["wheels_total"] > 30
     d = next(iter(eng.plates.g.values()))
     assert all(np.isfinite(d["passes"][0][:4]))
+
+
+def test_lost_pictures_leave_no_empty_columns():
+    """2026-10-01: a lost picture left ~5 empty columns that the plate cutter took for joints (false
+    "out of line"). The next picture's slit now reaches back to the previous one, whatever the jump."""
+    from src.cam4.stream import Cam4Stream, MAX_SLIT_HALF
+    st = Cam4Stream(load_cam4_bundle(BUNDLE))
+    s, h = 1000.0, 6
+    for step in [9.5, 9.5, 19.0, 9.5, 28.4, 12.3, 38.0, 9.4, 47.5, 9.5, 9.5]:   # 0-4 pictures lost
+        st.s_pasted, st.h_pasted = s, h
+        A = st._slit(s + step)[0]
+        h_new = min(-A[0], A[-1])
+        assert (s + step) - h_new <= s + h + 1, (step, h, h_new)      # reaches back to the previous slit
+        if step < 12.0:
+            assert len(A) == len(st.A)                                 # nothing lost: the calibrated slit
+        s, h = s + step, h_new
+    st.s_pasted, st.h_pasted = 0.0, 6
+    assert min(-st._slit(500.0)[0][0], st._slit(500.0)[0][-1]) == MAX_SLIT_HALF   # a wild jump stays bounded
+
+
+def test_plate_with_empty_columns_is_not_judged():
+    """Safety net: empty columns are never a joint, and a plate that has some is left to the next loop."""
+    from src.cam4.plates import PlateTracker
+    from src.cam4.identity import Cam4Identity
+    b = load_cam4_bundle(BUNDLE)
+    t = PlateTracker(b, Cam4Identity(b), "CAM-1")
+    t._position = lambda col: float(col)
+    rng = np.random.default_rng(0)
+    g = np.tile(rng.uniform(60, 200, (402, 190)).astype(np.float32), (1, 40))
+    g[:, ::190] = 20.0                                                 # joints every 190 columns
+    miss = np.zeros(g.shape[1], bool)
+    miss[3000:3006] = True; g[:, 3000:3006] = 0.0                      # one lost picture
+    t.on_strip(np.arange(g.shape[1]), g, 0, miss)
+    assert t.counters["plates_skipped_missing_total"] >= 1
+    assert t.counters["plates_total"] >= 20

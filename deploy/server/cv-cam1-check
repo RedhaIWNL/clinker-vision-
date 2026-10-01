@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# CAM-1 check: does the live camera stream lose pictures? (2026-10-01, false "out of line" alerts)
+# Reads the model's counters twice, 60 s apart, while CAM-1 is on (16:00-09:00), and prints the difference.
+# Lost pictures leave empty columns in the unrolled chain: about 9.5 columns per picture means none lost.
+source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
+step "CAM-1 stream check (takes 1 minute)"
+URL="http://127.0.0.1:$(web_port)/api/v1/status"
+python3 - "$URL" <<'EOF'
+import json, sys, time, urllib.request
+
+def read():
+    s = json.load(urllib.request.urlopen(sys.argv[1], timeout=5))
+    for c in s.get("cameras") or [s]:
+        if c.get("camera_id") == "CAM-1":
+            return c
+    return None
+
+a = read()
+if a is None or not (a.get("counters") or {}).get("stream_frames_total"):
+    print("CAM-1 is not running now (it runs 16:00-09:00). Try again during its hours.")
+    sys.exit(0)
+print("Status:", a.get("status"), "|", a.get("detail"))
+time.sleep(60)
+b = read()
+ka, kb = a.get("counters") or {}, b.get("counters") or {}
+d = lambda k: kb.get(k, 0) - ka.get(k, 0)
+frames, cols = d("stream_frames_total"), d("stream_columns_total")
+lost = d("stream_gap_frames_total")
+print()
+print("Last 60 s:")
+print("  pictures used        %d  (25/s = 1500)" % frames)
+print("  pictures lost        %d  (of them repeated copies: %d)" % (lost, d("stream_repeated_frames_total")))
+print("  sequence gaps        %d" % d("sequence_gaps_total"))
+print("  plates judged        %d" % d("plates_total"))
+print("  plates skipped       %d  (part of the plate never seen: judged next loop; should stay near 0)" % d("plates_skipped_missing_total"))
+print("  slits widened        %d  (a lost picture covered by the next one)" % d("stream_widened_slits_total"))
+print("  frames/s arriving    %s" % kb.get("stream_frames_per_second", "?"))
+print("  columns per picture  %.2f   <- about 9.5 = nothing lost; 10 or more = pictures lost" % (cols / max(frames, 1)))
+print("  lost share           %.1f %%" % (100.0 * lost / max(frames + lost, 1)))
+print()
+print("Since start: pictures %d, lost %d, plates %d, godets confirmed %d" % (
+    kb.get("stream_frames_total", 0), kb.get("stream_gap_frames_total", 0), kb.get("plates_total", 0),
+    kb.get("plate_godets_confirmed", 0)))
+EOF
+pause_if_icon

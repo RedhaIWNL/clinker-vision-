@@ -80,6 +80,10 @@ func (d Decoder) Run(ctx context.Context, emit func(Frame) error) error {
 		"-an",
 		"-c:v", "mjpeg",
 		"-q:v", "3",
+		// Pass decoded frames through as they come. The image2pipe default (constant rate) filled
+		// frames the NVR had dropped with copies of the last picture; the model read the copies as a
+		// stopped chain (plant server 2026-09-30, three cameras on one busy model).
+		"-fps_mode", "passthrough",
 	)
 	if d.MaxFrames > 0 {
 		args = append(args, "-frames:v", strconv.Itoa(d.MaxFrames))

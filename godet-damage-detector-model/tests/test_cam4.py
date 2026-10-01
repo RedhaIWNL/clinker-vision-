@@ -318,3 +318,56 @@ def test_two_bundles_for_one_camera_are_refused(tmp_path):
     with pytest.raises(ValueError, match="two bundles"):
         create_server("127.0.0.1:0", 8_000_000, str(ROOT / "model"), False, str(tmp_path / "s.db"),
                       cam4_bundle_dir=str(BUNDLE), sideplate_bundle_dirs=[str(BUNDLE)])
+
+
+# ---- plant server 2026-09-30: several cameras at once ---------------------------------------
+def test_repeated_pictures_are_lost_frames_not_a_stopped_chain():
+    """The decoder repeats the last picture when the camera stream loses frames. Byte-identical
+    pictures used to read as a chain standing still ("conveyor stopped", never locking)."""
+    eng = Cam4Engine(BUNDLE)
+    rng = np.random.default_rng(0)
+    frame = jpeg(rng.integers(0, 255, (1520, 2688), dtype=np.uint8))
+    for i in range(80):
+        d, ok = eng.on_frame(frame, f"f{i}", i + 1)
+        assert ok
+    assert eng.stream.counters["repeated_frames_total"] == 79
+    h = pb2.GodetStateResponse().health
+    eng.fill_health(h)
+    assert "LOSING FRAMES" in h.detail and "conveyor stopped" not in h.detail
+    assert h.counters["stream_repeated_share"] > 0.9
+
+
+def test_cameras_are_processed_in_parallel(tmp_path, monkeypatch):
+    """One stream carries every camera; each camera now has its own worker. With a frame costing
+    50 ms, 2 cameras x 12 frames take ~0.6 s in parallel, 1.2 s in the old single loop."""
+    import time
+    srv = create_server("127.0.0.1:0", 8_000_000, str(ROOT / "model"), False, str(tmp_path / "store.db"),
+                        cam4_bundle_dir=str(BUNDLE),
+                        sideplate_bundle_dirs=[str(relabelled_bundle(tmp_path, "CAM-3"))])
+    for eng in srv.servicer.sideplate.values():
+        real = eng.on_frame
+
+        def slow(*a, _real=real, **k):
+            time.sleep(0.05)
+            return _real(*a, **k)
+        monkeypatch.setattr(eng, "on_frame", slow)
+    port = srv.add_insecure_port("127.0.0.1:0")
+    srv.start()
+    ch = grpc.insecure_channel(f"127.0.0.1:{port}")
+    try:
+        stub = pb2_grpc.InferenceServiceStub(ch)
+        frame = grey_frame()
+        reqs = []
+        for i in range(12):
+            reqs.append(pb2.InferenceRequest(frame_id=f"c4-{i}", camera_id="CAM-4", image_data=frame, sequence_no=i + 1))
+            reqs.append(pb2.InferenceRequest(frame_id=f"c3-{i}", camera_id="CAM-3", image_data=frame, sequence_no=i + 1))
+        t = time.perf_counter()
+        resps = list(stub.Infer(iter(reqs)))
+        took = time.perf_counter() - t
+        assert len(resps) == 24
+        order = [r.frame_id for r in resps if r.frame_id.startswith("c4")]
+        assert order == [f"c4-{i}" for i in range(12)]            # within a camera the order is kept
+        assert took < 0.95, f"{took:.2f} s: cameras were not processed in parallel"
+    finally:
+        ch.close()
+        srv.stop(None)

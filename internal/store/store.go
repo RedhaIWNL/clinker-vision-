@@ -54,6 +54,7 @@ type Store struct {
 type ListFilter struct {
 	CameraID         string
 	FaultType        string
+	Target           string // observation target: "godet" or "galet" (wheels); empty = all
 	UnseenOnly       bool
 	Since            *time.Time
 	BeforeDetectedAt *time.Time
@@ -301,6 +302,10 @@ func (s *Store) ListAlerts(ctx context.Context, filter ListFilter) (ListResult, 
 	if filter.FaultType != "" {
 		query += " AND fault_type = ?"
 		args = append(args, filter.FaultType)
+	}
+	if filter.Target != "" {
+		query += " AND observation_target = ?"
+		args = append(args, filter.Target)
 	}
 	if filter.UnseenOnly {
 		query += " AND seen_at IS NULL"

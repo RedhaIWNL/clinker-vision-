@@ -24,6 +24,8 @@ change. Evidence is a picture of the unrolled chain around the place (like the r
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 import uuid
@@ -39,6 +41,23 @@ MIN_PASSES = 3              # 2026-09-07 replay: judged on 1 or 2 passes, one mi
                             # a flag that the next loop cleared (13 of 15 short-lived flags); offline: 3-4
 GAP_GODETS = 5
 DENSE_WINDOW, DENSE_MIN = 3, 2
+# The operator can change the two limits in the web page (2026-09-30): the pipeline writes them to
+# settings.json next to its alerts database, mounted read-only here; read at each evaluation.
+SETTINGS = os.environ.get("CV_SETTINGS", "/app/pipeline-data/settings.json")
+
+
+def wheel_limits(path=None):
+    """(gap_godets, dense_window): alert at gap_godets or more godets in a row without a wheel, and at
+    2 wheels within dense_window godets. Defaults (5, 3) when the file is missing or invalid."""
+    try:
+        with open(path or SETTINGS) as f:
+            d = json.load(f)
+        gap, win = int(d["wheel_max_gap_godets"]) + 1, int(d["wheel_min_spacing_godets"])
+        if 3 <= gap <= 21 and 1 <= win <= 6 and win < gap:
+            return gap, win
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return GAP_GODETS, DENSE_WINDOW
 COVER_RES = 8               # coverage bitmap resolution (map columns per cell)
 CHUNK = 2000                # strip columns per stored evidence chunk
 CONTEXT_GODETS = 3
@@ -345,6 +364,7 @@ class WheelTracker:
         latest = passes[-1]
         wheels_by_col = [w[1] for w in latest["wheels"]]
         found = []
+        gap_godets, dense_window = wheel_limits()
         # rule A: >= 5 consecutive covered godets with no wheel (circular)
         empty = (count == 0) & covered
         if (~empty).any():
@@ -353,23 +373,26 @@ class WheelTracker:
                 if empty[g]:
                     run.append(g)
                 else:
-                    if len(run) >= GAP_GODETS:
+                    if len(run) >= gap_godets:
                         found.append(("wheel_gap", run[0], run[-1], {"godets": len(run), "wheels": 0}))
                     run = []
         # rule B: >= 2 wheels within any 3 consecutive godets (windows merged)
-        hot = [g for g in range(self.N) if sum(count[(g + k) % self.N] for k in range(DENSE_WINDOW)) >= DENSE_MIN]
+        hot = [g for g in range(self.N) if sum(count[(g + k) % self.N] for k in range(dense_window)) >= DENSE_MIN]
         merged = []                                                # [first, last] unwrapped (last may pass N)
         for g in hot:                                              # hot is ascending
             if merged and g <= merged[-1][1] + 1:                  # starts inside or right after
-                merged[-1][1] = g + DENSE_WINDOW - 1
+                merged[-1][1] = g + dense_window - 1
             else:
-                merged.append([g, g + DENSE_WINDOW - 1])
+                merged.append([g, g + dense_window - 1])
         if len(merged) > 1 and merged[-1][1] + 1 >= merged[0][0] + self.N:   # joins across the loop end
             merged[0][0] = merged.pop()[0] - self.N
         merged = [[a % self.N, b % self.N] for a, b in merged]
         for a, b in merged:
             span = [(a + k) % self.N for k in range(((b - a) % self.N) + 1)]
-            found.append(("wheel_density", a, b, {"godets": len(span), "wheels": int(sum(count[g] for g in span))}))
+            at = [k for k, g in enumerate(span) for _ in range(int(count[g]))]     # wheel godets, in order
+            spacing = min((y - x for x, y in zip(at, at[1:])), default=0)
+            found.append(("wheel_density", a, b, {"godets": len(span), "wheels": int(sum(count[g] for g in span)),
+                                                  "min_spacing": int(spacing)}))
         # rule M: a wheel of the EARLIER passes' reference, absent on the 2 latest passes that
         # could see it (the latest passes must not vote on their own reference)
         if len(passes) >= 4:
@@ -447,6 +470,8 @@ class WheelTracker:
             ev.measurements["last_godet"] = float(self.ext(f["last"]))
             ev.measurements["godets"] = float(f["godets"])
             ev.measurements["wheels"] = float(f["wheels"])
+            if "min_spacing" in f:                      # too many wheels: the closest two, in godets
+                ev.measurements["min_spacing"] = float(f["min_spacing"])
             if f["evidence"]:
                 ev.evidence_frame_id = f["evidence"]["frame_id"]
                 bx = f["evidence"]["box"]
