@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# CAM-1 alerts vs the user's own judgements (2026-09-29 reviews, 357 godets: 94 damaged in the final
+# whole-chain check). Are live alerts on godets the user saw damaged, or on godets the user saw normal?
+#   bash deploy/server/cv-cam1-alerts [hours]     (default: alerts of the last 24 hours)
+source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
+step "CAM-1 alerts compared with your own judgements"
+python3 - "http://127.0.0.1:$(web_port)" "${1:-24}" <<'EOF2'
+import datetime as dt, json, sys, urllib.parse, urllib.request
+base, hours = sys.argv[1], float(sys.argv[2])
+LABELS = "3N 4N 9N 10N 12N 18N 33N 37N 43N 44B 45N 46N 47C 48N 50N 51C 52N 53N 55N 61N 62C 63C 64N 65C 66N 67C 68N 70N 71C 72N 74N 75C 76N 81N 82C 83C 84C 85C 86C 87C 88C 89N 92N 93O 94N 95N 96O 97N 100N 102N 103C 104N 107N 109N 110N 111O 112O 113O 114N 116N 117O 118N 120N 124N 125B 126N 134N 135N 149N 150N 155N 156O 157N 170N 171N 172O 173N 180N 187N 188N 191N 192O 193N 196N 199N 200N 203N 205N 209N 211N 213N 218N 219N 220C 221C 222C 223C 224N 225C 226C 227N 231N 232N 234N 235C 236N 238N 239C 240N 242N 249N 251N 270N 282N 283N 293N 295N 296O 297N 302N 308N 312N 316N 317O 318O 319N 320N 326N 333N 334N 336N 339N 342N 359N 360C 361N 368N 369N 371N 372C 373C 374N 375N 376C 377C 378C 379N 388N 389N 392N 393N 399N 400N 406N 407C 408N 409N 410N 411N 412O 413O 414N 415N 418N 422N 424N 428N 429N 436N 440N 445N 446B 447N 470N 476N 496N 497B 498N 500N 510N 511N 512B 513N 516N 520N 523N 528N 568N 571N 572B 573C 574N 583N 595N 596N 603N 621N 643N 644N 645B 646N 649N 650C 651N 653N 654N 655N 660N 669N 671N 672O 673O 674B 675N 680N 681B 682C 683N 696N 697N 704N 705B 706N 708N 717N 718N 719N 727N 734N 751N 752B 753B 754N 756N 757B 758B 759C 760N 761B 762B 763N 785N 786B 787N 789N 790O 791N 794N 795N 802N 803C 804C 805N 811N 815N 816O 817N 826N 829N 839N 858N 859B 860N 862N 864N 865N 871N 881N 883N 885N 892N 896N 897O 898N 905N 912N 913N 916N 917B 918C 919O 920N 930N 940N 944N 945N 947N 954N 963N 965N 973N 974O 975N 977N 988N 989N 990N 995N 996C 997C 998C 999N 1002N 1004N 1012N 1014N 1015B 1016N 1017N 1020N 1022N 1023N 1024O 1025O 1026N 1029N 1037N 1038N 1039N 1047N 1056N 1057B 1058O 1059N 1064N 1080N 1081N 1082N 1083N 1084N 1088N 1089N 1090O 1091N 1104N 1106N 1122N 1130N 1139N 1146N 1154N 1155O 1156N 1166N 1167O 1168N 1173N 1175N 1176C 1177N 1178C 1179C 1180N 1185N 1186C 1187C 1188N"
+lab = {int(t[:-1]): t[-1] for t in LABELS.split()}
+NAME = {"N": "normal", "C": "cut", "O": "out of line", "B": "cut + out of line"}
+TYPE = {1.0: "C", 2.0: "O", 3.0: "B"}
+since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+items, cursor = [], None
+while True:
+    q = {"camera_id": "CAM-1", "limit": "200"}
+    if cursor: q["cursor"] = cursor
+    d = json.load(urllib.request.urlopen(base + "/api/v1/alerts?" + urllib.parse.urlencode(q), timeout=10))
+    items += d.get("items") or []
+    cursor = d.get("next_cursor")
+    if not cursor: break
+rows = []
+for a in items:
+    m = json.loads(a.get("measurements_json") or "{}")
+    if "damage_type" not in m: continue                      # wheel alerts and old CAM-1 alerts
+    t = dt.datetime.fromisoformat(a["detected_at"].replace("Z", "+00:00"))
+    if t < since: continue
+    g = int(a.get("godet_id") or 0) % 1210
+    rows.append((g, TYPE.get(m.get("damage_type"), "?"), float(m.get("severity", 0)), float(m.get("cut", 0)),
+                 float(m.get("out_of_line", 0)), m.get("evidence") == "latest_frame", t, a.get("seen_at") is not None))
+godets = {}
+for r in rows: godets.setdefault(r[0], r)
+dam = [r for g, r in godets.items() if lab.get(g) in ("C", "O", "B")]
+nor = [r for g, r in godets.items() if lab.get(g) == "N"]
+unl = [r for g, r in godets.items() if g not in lab]
+print("CAM-1 damage alerts, last %g h: %d alerts on %d godets" % (hours, len(rows), len(godets)))
+print("  on godets YOU saw damaged     %3d   (expected: about 92 of 94 within a few loops)" % len(dam))
+print("  on godets YOU saw normal      %3d   (recorded video: 3-6)" % len(nor))
+print("  on godets you never looked at %3d   (recorded video: 6-11)" % len(unl))
+print("  picture was NOT the godet     %3d   (live view used: the godet's picture was gone)" % sum(r[5] for r in godets.values()))
+same = sum(1 for r in dam if (r[1] == "B") == (lab[r[0]] == "B") and (r[1] in ("C", "B")) == (lab[r[0]] in ("C", "B")))
+print("  damaged ones with your type   %3d of %d" % (same, len(dam)))
+def show(title, rs):
+    if not rs: return
+    print(); print(title)
+    for g, ty, sc, c, o, lf, t, seen in sorted(rs, key=lambda r: -r[2]):
+        print("  godet %4d  %-18s score %.2f  cut %.2f  out %.2f  %s%s" % (g or 1210, NAME.get(ty, ty), sc, c, o,
+              t.astimezone().strftime("%H:%M"), "  (picture: live view)" if lf else ""))
+show("Alerts on godets YOU saw NORMAL (send a photo of this list):", nor)
+show("Alerts on godets you never looked at:", unl)
+EOF2
+pause_if_icon
