@@ -89,8 +89,13 @@ func TestCameraHoursFromPage(t *testing.T) {
 	cam := config.CameraConfig{ID: "CAM-1", Enabled: true,
 		Schedule: &config.ScheduleConfig{Enabled: true, Start: "16:00", Stop: "09:00", Timezone: "Africa/Casablanca"}}
 	e := &laneEnv{loc: time.UTC, settingsPath: path}
-	if s, off, page := e.cameraHours(cam); off || page || s.Start != "16:00" {
-		t.Fatalf("no page hours: config.yaml expected, got %+v off=%v page=%v", s, off, page)
+	if s, off, page := e.cameraHours(cam); off || page || s.Start != "16:00" || s.Stop != "08:00" {
+		t.Fatalf("no page hours: the default hours 16:00-08:00 expected (not config.yaml), got %+v off=%v page=%v", s, off, page)
+	}
+	other := config.CameraConfig{ID: "CAM-2", Enabled: true,
+		Schedule: &config.ScheduleConfig{Enabled: true, Start: "10:00", Stop: "11:00", Timezone: "Africa/Casablanca"}}
+	if s, _, _ := e.cameraHours(other); s.Start != "10:00" {
+		t.Fatalf("a camera without default hours follows config.yaml: %+v", s)
 	}
 	write := func(body string) {
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {

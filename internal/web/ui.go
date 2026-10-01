@@ -329,7 +329,7 @@ toast("Limits saved: the model uses them from the next chain loop (about 16 minu
 /* ---- camera hours ---- */
 function renderHours(d){if(!d||!d.cameras||!d.cameras.length){$("hours").hidden=true;return;}$("hours").hidden=false;
 const set=d.camera_hours||{};
-$("hours-cams").innerHTML=d.cameras.map(c=>{const h=set[c.id],m=h?h.mode:"config",cf=c.config_hours||{},src=h&&h.mode==="hours"?h:(cf.mode==="hours"?cf:{start:"",stop:""});
+$("hours-cams").innerHTML=d.cameras.map(c=>{const h=set[c.id],m=h?h.mode:"config",cf=c.default_hours||{},src=h&&h.mode==="hours"?h:(cf.mode==="hours"?cf:{start:"",stop:""});
 const cfText=cf.mode==="hours"?cf.start+" - "+cf.stop:"always on";
 return '<div class="cam" data-cam="'+esc(c.id)+'"><b>'+esc(c.id)+'</b>'+
 '<select class="hm"><option value="config"'+(m==="config"?" selected":"")+'>Default ('+esc(cfText)+')</option>'+

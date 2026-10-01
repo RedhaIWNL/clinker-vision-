@@ -438,16 +438,20 @@ func (e *laneEnv) cameraHours(camera config.CameraConfig) (schedule config.Sched
 	if e.settingsPath == "" {
 		return base, false, false
 	}
-	h, ok := web.LoadSettings(e.settingsPath).CameraHours[camera.ID]
-	if !ok {
-		return base, false, false
-	}
 	tz := base.Timezone
 	if tz == "" {
 		tz = e.cfg.Schedule.Timezone
 	}
 	if tz == "" {
 		tz = "Africa/Casablanca"
+	}
+	h, ok := web.LoadSettings(e.settingsPath).CameraHours[camera.ID]
+	if !ok {
+		def, known := web.DefaultCameraHours[camera.ID]
+		if !known {
+			return base, false, false
+		}
+		return config.ScheduleConfig{Enabled: true, Start: def.Start, Stop: def.Stop, Timezone: tz}, false, false
 	}
 	switch h.Mode {
 	case "off":
@@ -477,7 +481,10 @@ func (e *laneEnv) inWindow(camera config.CameraConfig) (bool, string) {
 	if schedule.Contains(time.Now().In(loc)) {
 		return true, ""
 	}
-	source := "config.yaml"
+	source := "default hours"
+	if _, known := web.DefaultCameraHours[camera.ID]; !known && !fromPage {
+		source = "config.yaml"
+	}
 	if fromPage {
 		source = "camera hours panel"
 	}
@@ -882,9 +889,11 @@ func main() {
 		if !camera.Enabled {
 			continue
 		}
-		info := web.CameraInfo{ID: camera.ID, ConfigHours: web.CameraHours{Mode: "always"}}
-		if sch := cfg.ScheduleFor(camera); sch.Enabled && sch.Start != sch.Stop {
-			info.ConfigHours = web.CameraHours{Mode: "hours", Start: sch.Start, Stop: sch.Stop}
+		info := web.CameraInfo{ID: camera.ID, DefaultHours: web.CameraHours{Mode: "always"}}
+		if def, known := web.DefaultCameraHours[camera.ID]; known {
+			info.DefaultHours = def
+		} else if sch := cfg.ScheduleFor(camera); sch.Enabled && sch.Start != sch.Stop {
+			info.DefaultHours = web.CameraHours{Mode: "hours", Start: sch.Start, Stop: sch.Stop}
 		}
 		webAPI.Cameras = append(webAPI.Cameras, info)
 	}

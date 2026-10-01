@@ -146,3 +146,30 @@ def test_plate_with_empty_columns_is_not_judged():
     t.on_strip(np.arange(g.shape[1]), g, 0, miss)
     assert t.counters["plates_skipped_missing_total"] >= 1
     assert t.counters["plates_total"] >= 20
+
+
+def test_confirmed_godet_keeps_and_resends_its_own_picture():
+    """2026-10-01: alerts showed the live view (another godet) when the pipeline's picture cache had been
+    emptied by a lane restart. The godet keeps its strongest frame in RAM and hands it over again when it is
+    confirmed; after a model restart it gets a fresh one on its next pass."""
+    from src.cam4.plates import PlateTracker
+    from src.cam4.identity import Cam4Identity
+    b = load_cam4_bundle(BUNDLE)
+    sent = []
+    def retain(col):
+        return {"frame_id": f"f{col}", "box": [0, 0, 1, 1], "captured_at": None,
+                "_frame": {"frame_id": f"f{col}", "jpeg": b"jpeg", "s": float(col)}}
+    t = PlateTracker(b, Cam4Identity(b), "CAM-1", retain, lambda rec: sent.append(rec["frame_id"]))
+    bad, good = np.array([0.99, 0.99, 0.99]), np.array([0.01, 0.01, 0.01])
+    t._on_plate(7, 0, bad, 0.0, 100)
+    assert not sent and 7 in t.frames                      # suspicious: picture kept, not confirmed yet
+    t._on_plate(7, 1, bad, 0.0, 200)
+    d = t.g[7]
+    assert d["state"] == "confirmed" and sent == [d["evidence"]["frame_id"]] and d["sent"] == sent[-1]
+    t._on_plate(8, 0, good, 0.0, 300)
+    assert 8 not in t.frames                                # a normal godet keeps no picture
+    t2 = PlateTracker(b, Cam4Identity(b), "CAM-1", retain, lambda rec: sent.append(rec["frame_id"]))
+    t2.restore(t.snapshot())                                # model restart: the JPEGs are gone
+    assert t2.g[7]["sent"] is None and not t2.frames
+    t2._on_plate(7, 2, good, 0.0, 400)                      # next pass, even a mild one: fresh picture
+    assert t2.g[7]["sent"] == "f400" and sent[-1] == "f400"

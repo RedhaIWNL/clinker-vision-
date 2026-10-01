@@ -4,7 +4,7 @@
 # The plant server (6 cores, Xeon E5-2620 v3) cannot run three cameras at 25 frames/s at once
 # (2026-09-30: each got ~5 frames/s and read the chain as stopped). CAM-1 and CAM-4 see the same side
 # of the chain, CAM-3 the other one. Hours chosen for the light each camera was tuned on:
-WINDOWS="CAM-3=09:00-12:30 CAM-4=12:30-16:00 CAM-1=16:00-09:00"
+WINDOWS="CAM-3=09:00-12:30 CAM-4=12:30-16:00 CAM-1=16:00-08:00"
 
 set -u
 [ "$(id -u)" = 0 ] || exec sudo bash "$0" "$@"

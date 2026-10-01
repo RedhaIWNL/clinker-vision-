@@ -5,8 +5,10 @@ server:
 cameras:
   # CAM-1 was re-aimed (~2026-09-27): it now sees the chain end after the sprocket (the CAM-4 side).
   # The model serves it with the side-plate engine and bundle model/cam1new (loaded by docker-compose):
-  # wheels and godet outside damage (cut / out of line), day and night. Almost 24 h: the window closes
-  # one minute a day so the daily report CAM-1-day-<date>.md is written. Enable it as in RUN-CAM4.md 4c.
+  # wheels and godet outside damage (cut / out of line). Verified on night and 17:00 / 07:00 light only
+  # (no footage 08:00-16:00; 2026-10-01 daylight alerts went to neighbouring godets): 16:00 -> 08:00.
+  # ONE CAMERA AT A TIME: this server cannot run two at 25 frames/s (2026-09-30). Hours can also be set
+  # in the viewer's Camera hours box. Enable it as in RUN-CAM4.md 4c.
   - id: "CAM-1"
     enabled: false
     nvr_rtsp_url: "rtsp://admin:REDACTED@192.168.1.200:554/cam/realmonitor?channel=1&subtype=0"
@@ -14,8 +16,8 @@ cameras:
     queue_capacity: 64
     schedule:
       enabled: true
-      start: "06:01"
-      stop: "06:00"
+      start: "16:00"
+      stop: "08:00"
       timezone: "Africa/Casablanca"
   - id: "CAM-2"
     enabled: false
@@ -32,7 +34,7 @@ cameras:
     schedule:
       enabled: true
       start: "09:00"
-      stop: "16:00"
+      stop: "12:30"
       timezone: "Africa/Casablanca"
   # Day side plates (overlap fault). NVR channel 4 = camera 192.168.1.144, main stream
   # (2688x1520; the model refuses any other size). Its own hours: the calibration was
@@ -45,7 +47,7 @@ cameras:
     queue_capacity: 64
     schedule:
       enabled: true
-      start: "09:00"
+      start: "12:30"
       stop: "16:00"
       timezone: "Africa/Casablanca"
   - id: "CAM-5"

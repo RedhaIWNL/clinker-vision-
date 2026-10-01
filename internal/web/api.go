@@ -25,7 +25,7 @@ type API struct {
 	Now          func() time.Time
 	// SettingsPath is the settings file shared with the model (wheel alert limits); empty = no settings API.
 	SettingsPath string
-	// Cameras enabled in config.yaml with their hours there (shown on the camera hours panel).
+	// Cameras enabled in config.yaml with the hours they follow on Default (camera hours panel).
 	Cameras    []CameraInfo
 	settingsMu sync.Mutex
 }

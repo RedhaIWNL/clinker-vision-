@@ -83,7 +83,7 @@ class Cam4Engine:
         self.pass_alarm = float(self.b.rules["pass_alarm_relative"])
         self.wheels = WheelTracker(self.b, None, self.camera_id, self._queue_evidence) if self.b.wheels else None
         # new Camera 1: godet outside damage per plate (cut / out of line), instead of the overlap history
-        self.plates = PlateTracker(self.b, None, self.camera_id, self._retain_plate) if self.b.plates else None
+        self.plates = PlateTracker(self.b, None, self.camera_id, self._retain_plate, self.resend) if self.b.plates else None
         self._build_front_end(None, None)
         if store is not None:
             snap = store.load_kv(self.state_key)
@@ -230,7 +230,22 @@ class Cam4Engine:
         x0, y0, x1, y1 = max(0.0, min(xs)), max(0.0, min(ys)), min(W, max(xs)), min(H, max(ys))
         ts = rec["captured_at"]
         return {"frame_id": rec["frame_id"], "box": [x0 / W, y0 / H, (x1 - x0) / W, (y1 - y0) / H],
-                "captured_at": None if ts is None else [int(ts.seconds), int(ts.nanos)]}
+                "captured_at": None if ts is None else [int(ts.seconds), int(ts.nanos)],
+                "_frame": rec}                               # with the JPEG: kept in RAM by the plate tracker
+
+    def resend(self, rec):
+        """Hand a kept frame to the pipeline again (a confirmed godet's picture: the pipeline's evidence
+        cache is emptied when the camera lane restarts, 2026-10-01). The pipeline ignores a frame it has."""
+        with self.lock:
+            if rec["frame_id"] not in self.retained:
+                self.retained[rec["frame_id"]] = {k: v for k, v in rec.items() if k != "jpeg"}
+            if all(r["frame_id"] != rec["frame_id"] for r in self.outbox):
+                self.outbox.append(rec)
+
+    def handed(self, frame_id):
+        """The frame has left the outbox (attached to a response the pipeline received)."""
+        with self.lock:
+            return all(r["frame_id"] != frame_id for r in self.outbox)
 
     def _on_columns(self, cols, fp_raw, sev, top, missing):
         """Scored columns: retain the frame of every strong half-plate block."""
@@ -364,9 +379,16 @@ class Cam4Engine:
             self.wheels.events(r, requested)
         if self.plates is not None:
             TYPES = {"cut": 1.0, "out of line": 2.0, "cut + out of line": 3.0}
+            waiting = 0
             for g, d in sorted(self.plates.confirmed().items()):
                 gid = self.external_id(g)
                 if requested and gid not in requested:
+                    continue
+                e = d.get("evidence")
+                if not (e and e.get("frame_id") and d.get("sent") == e["frame_id"] and self.handed(e["frame_id"])):
+                    # the godet's own picture is not with the pipeline yet: report the alert once it is, never
+                    # with another picture (2026-10-01: the live view showed a different godet)
+                    waiting += 1
                     continue
                 ev = r.events.add()
                 ev.event_key = f"{self.camera_id}:DAMAGE:{gid}:{d['confirmed_loop']}"
@@ -375,13 +397,12 @@ class Cam4Engine:
                 ev.measurements["passes_seen"] = float(len(d["passes"]))
                 ev.measurements["cut"] = float(d["cut"]); ev.measurements["out_of_line"] = float(d["out_of_line"])
                 ev.measurements["damage_type"] = TYPES[self.plates.damage_type(d)]   # 1 cut, 2 out of line, 3 both
-                e = d.get("evidence")
-                if e and e.get("frame_id"):
-                    ev.evidence_frame_id = e["frame_id"]
-                    bx = e["box"]; ev.evidence_box.x, ev.evidence_box.y = bx[0], bx[1]
-                    ev.evidence_box.width, ev.evidence_box.height = bx[2], bx[3]
-                    if e.get("captured_at"):
-                        ev.occurred_at.seconds, ev.occurred_at.nanos = e["captured_at"]
+                ev.evidence_frame_id = e["frame_id"]
+                bx = e["box"]; ev.evidence_box.x, ev.evidence_box.y = bx[0], bx[1]
+                ev.evidence_box.width, ev.evidence_box.height = bx[2], bx[3]
+                if e.get("captured_at"):
+                    ev.occurred_at.seconds, ev.occurred_at.nanos = e["captured_at"]
+            self.plates.counters["plate_godets_waiting_picture"] = waiting
         wanted = sorted(requested) or sorted(
             g for g, v in G.items() if v["state"] in ("confirmed", "suspect"))
         for g in wanted:

@@ -83,7 +83,8 @@
    0.99,
    1.0,
    1.01
-  ]
+  ],
+  "anchor_tol": 120
  },
  "rules": {
   "pass_alarm_relative": 1.0,
@@ -163,7 +164,9 @@
     "logit p_out_of_line",
     "valley relative (median over passes)"
    ]
-  }
+  },
+  "max_anchor_gap": 7500,
+  "max_scale_dev": 0.05
  },
  "wheels": {
   "mode": "disc",

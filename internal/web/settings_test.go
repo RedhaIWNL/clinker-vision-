@@ -59,13 +59,17 @@ func TestCameraHoursSettings(t *testing.T) {
 	defer alertStore.Close()
 	api := NewAPI(alertStore, filepath.Join(root, "evidence"))
 	api.SettingsPath = filepath.Join(root, "settings.json")
-	api.Cameras = []CameraInfo{{ID: "CAM-1", ConfigHours: CameraHours{Mode: "hours", Start: "16:00", Stop: "09:00"}}}
+	api.Cameras = []CameraInfo{{ID: "CAM-1", DefaultHours: DefaultCameraHours["CAM-1"]}, {ID: "CAM-3", DefaultHours: DefaultCameraHours["CAM-3"]},
+		{ID: "CAM-4", DefaultHours: DefaultCameraHours["CAM-4"]}}
 	handler := NewHandler(health.New(), metrics.New(), api, nil)
 	do := func(method, body string) (int, string) {
 		req := httptest.NewRequest(method, "/api/v1/settings", strings.NewReader(body))
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		return rec.Code, rec.Body.String()
+	}
+	if code, body := do(http.MethodGet, ""); code != 200 || strings.Contains(body, `"overlaps"`) {
+		t.Fatalf("the default hours must not overlap: %d %s", code, body)
 	}
 	if code, body := do(http.MethodPut, `{"wheel_max_gap_godets":6,"wheel_min_spacing_godets":2}`); code != 200 {
 		t.Fatalf("limits: %d %s", code, body)
@@ -74,14 +78,14 @@ func TestCameraHoursSettings(t *testing.T) {
 	if code != 200 || !strings.Contains(body, `"wheel_max_gap_godets":6`) {
 		t.Fatalf("hours must keep the wheel limits: %d %s", code, body)
 	}
-	if !strings.Contains(body, `"overlaps":["CAM-1 and CAM-3"]`) || !strings.Contains(body, `"config_hours":{"mode":"hours","start":"16:00","stop":"09:00"}`) {
+	if !strings.Contains(body, `"overlaps":["CAM-1 and CAM-3"]`) || !strings.Contains(body, `"default_hours":{"mode":"hours","start":"16:00","stop":"08:00"}`) {
 		t.Fatalf("overlap and config hours: %s", body)
 	}
 	if code, body := do(http.MethodPut, `{"wheel_max_gap_godets":5,"wheel_min_spacing_godets":2}`); code != 200 || !strings.Contains(body, `"CAM-4":{"mode":"off"}`) {
 		t.Fatalf("limits must keep the hours: %d %s", code, body)
 	}
 	if code, body := do(http.MethodPut, `{"camera_hours":{"CAM-1":null}}`); code != 200 || strings.Contains(body, `"CAM-1":{`) || !strings.Contains(body, `"CAM-3":{`) {
-		t.Fatalf("null = back to config.yaml, others kept: %d %s", code, body)
+		t.Fatalf("null = back to the default hours, others kept: %d %s", code, body)
 	}
 	for _, bad := range []string{`{"camera_hours":{"CAM-1":{"mode":"hours","start":"25:00","stop":"09:00"}}}`,
 		`{"camera_hours":{"CAM-1":{"mode":"hours","start":"09:00","stop":"09:00"}}}`,

@@ -18,9 +18,9 @@ type Settings struct {
 	WheelMaxGapGodets int `json:"wheel_max_gap_godets"`
 	// alert when two wheels are closer than this many godets (today's rule: within 3 godets -> 3)
 	WheelMinSpacingGodets int `json:"wheel_min_spacing_godets"`
-	// Camera hours set on the page (camera id -> hours). They replace the hours in config.yaml for that
-	// camera; the pipeline reads them every 15 s, so a change applies without a restart. A camera that is
-	// not here follows config.yaml.
+	// Camera hours set on the page (camera id -> hours). The pipeline reads them every 15 s, so a change
+	// applies without a restart. A camera that is not here follows DefaultCameraHours (or, for a camera
+	// without default hours, its hours in config.yaml).
 	CameraHours map[string]CameraHours `json:"camera_hours,omitempty"`
 }
 
@@ -31,10 +31,19 @@ type CameraHours struct {
 	Stop  string `json:"stop,omitempty"`
 }
 
-// CameraInfo describes a camera enabled in config.yaml, for the page: its hours from config.yaml.
+// DefaultCameraHours: one camera at a time (the plant server cannot run two at 25 frames/s, 2026-09-30),
+// each in the light it was verified on. CAM-1 stops at 08:00: no footage 08:00-16:00 and the 2026-10-01
+// daylight alerts went to neighbouring godets. These replace the config.yaml hours of these cameras.
+var DefaultCameraHours = map[string]CameraHours{
+	"CAM-3": {Mode: "hours", Start: "09:00", Stop: "12:30"},
+	"CAM-4": {Mode: "hours", Start: "12:30", Stop: "16:00"},
+	"CAM-1": {Mode: "hours", Start: "16:00", Stop: "08:00"},
+}
+
+// CameraInfo describes a camera enabled in config.yaml, for the page: the hours it follows on Default.
 type CameraInfo struct {
-	ID          string      `json:"id"`
-	ConfigHours CameraHours `json:"config_hours"`
+	ID           string      `json:"id"`
+	DefaultHours CameraHours `json:"default_hours"`
 }
 
 func hhmm(v string) (int, bool) {
@@ -86,18 +95,26 @@ func (h CameraHours) minutes() []bool {
 	return on
 }
 
-// Overlaps lists the cameras whose page hours overlap (the plant server runs one camera at a time).
-func (s Settings) Overlaps() []string {
-	ids := make([]string, 0, len(s.CameraHours))
-	for id := range s.CameraHours {
+// Overlaps lists the cameras whose hours overlap (the plant server runs one camera at a time): page hours,
+// else the camera's default hours.
+func (s Settings) Overlaps(cameras []CameraInfo) []string {
+	hours := make(map[string]CameraHours, len(cameras))
+	for _, c := range cameras {
+		hours[c.ID] = c.DefaultHours
+	}
+	for id, h := range s.CameraHours {
+		hours[id] = h
+	}
+	ids := make([]string, 0, len(hours))
+	for id := range hours {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	var out []string
 	for i := range ids {
-		a := s.CameraHours[ids[i]].minutes()
+		a := hours[ids[i]].minutes()
 		for j := i + 1; j < len(ids); j++ {
-			b := s.CameraHours[ids[j]].minutes()
+			b := hours[ids[j]].minutes()
 			for m := range a {
 				if a[m] && b[m] {
 					out = append(out, ids[i]+" and "+ids[j])
@@ -161,7 +178,7 @@ type settingsView struct {
 }
 
 func (a *API) settingsView(s Settings) settingsView {
-	return settingsView{Settings: s, Cameras: a.Cameras, Overlaps: s.Overlaps()}
+	return settingsView{Settings: s, Cameras: a.Cameras, Overlaps: s.Overlaps(a.Cameras)}
 }
 
 func (a *API) PutSettings(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +206,7 @@ func (a *API) PutSettings(w http.ResponseWriter, r *http.Request) {
 		for id, h := range in.CameraHours {
 			hours[id] = h
 		}
-		for id, h := range change.CameraHours { // null = back to config.yaml
+		for id, h := range change.CameraHours { // null = back to the default hours
 			if h == nil {
 				delete(hours, id)
 			} else {

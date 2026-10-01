@@ -29,6 +29,10 @@ from scipy.ndimage import maximum_filter1d
 COMMIT_LAG = 700            # columns: joints this far behind the newest column are final
 BUFFER = 6000               # strip columns kept
 POPULATION = 1500           # plates in the valley-score population
+# Plate history saved before this version is not restored: passes judged on a chain picture torn by lost
+# frames (before v2026.10.01) mixed with clean ones and confirmed neighbours of damaged godets (2026-10-01).
+STATE_VERSION = "2026-10-01b"
+MAX_FRAMES = 400            # godet pictures kept in RAM (~0.7 MB each): the most suspicious godets
 
 
 def edge_signal(g, rows):
@@ -82,8 +86,13 @@ def valley_score(g):
 
 
 class PlateTracker:
-    def __init__(self, bundle, ident, camera_id, retain=None):
-        self.c = bundle.plates; self.ident = ident; self.cam = camera_id; self.retain = retain
+    def __init__(self, bundle, ident, camera_id, retain=None, resend=None):
+        self.c = bundle.plates; self.ident = ident; self.cam = camera_id; self.retain = retain; self.resend = resend
+        # Each suspicious godet keeps the frame of its strongest pass (with the JPEG) until its alert is stored:
+        # the pipeline's evidence cache is emptied when the camera lane restarts, and alerts then showed the
+        # live view, i.e. another godet (2026-10-01). Not persisted: after a model restart a confirmed godet
+        # gets a fresh picture on its next pass before it is reported.
+        self.frames = {}
         self.L = int(bundle.ident["loop_cols"]); self.P = float(bundle.ident["pitch"]); self.N = int(bundle.ident["godets"])
         self.phase = float(bundle.ident["phase"])
         self.nets = [cv2.dnn.readNetFromONNX(str(f)) for f in bundle.plate_models]
@@ -98,7 +107,8 @@ class PlateTracker:
         self.lock = threading.Lock()
         self.miss = np.zeros(0, bool)                        # empty columns (no picture covered them)
         self.counters = {"plates_total": 0, "plates_estimated_joint_total": 0, "plates_unplaced_total": 0,
-                         "plate_godets_confirmed": 0, "plates_skipped_missing_total": 0}
+                         "plate_godets_confirmed": 0, "plates_skipped_missing_total": 0, "plates_unsure_total": 0,
+                         "plate_godets_waiting_picture": 0}
 
     # ---- input: scored strip columns (grey, rows row0..row1) -------------------------------------
     def on_strip(self, cols, g, row0, missing=None):
@@ -146,7 +156,11 @@ class PlateTracker:
             return None
         cs = np.array([x[0] for x in an], float); ps = np.array([x[1] for x in an], float)
         k = int(np.clip(np.searchsorted(cs, col), 1, len(cs) - 1))
-        return ps[k - 1] + (col - cs[k - 1]) * (ps[k] - ps[k - 1]) / max(cs[k] - cs[k - 1], 1.0)
+        gap = cs[k] - cs[k - 1]
+        max_gap = self.c.get("max_anchor_gap")
+        if max_gap is not None and (gap > max_gap or abs((ps[k] - ps[k - 1]) / max(gap, 1.0) - 1.0) > self.c.get("max_scale_dev", 0.05)):
+            return np.nan                                    # unsure which godet: not judged (counted)
+        return ps[k - 1] + (col - cs[k - 1]) * (ps[k] - ps[k - 1]) / max(gap, 1.0)
 
     def _score_pending(self):
         W = self.c["crop_w"]; r0, r1 = [r - self.row0 for r in self.c["rows"]]
@@ -163,6 +177,10 @@ class PlateTracker:
                     continue
                 return                                       # the map has not placed it yet
             self.pending.popleft()
+            if not np.isfinite(pos):
+                self.counters["plates_unsure_total"] = self.counters.get("plates_unsure_total", 0) + 1
+                self.prev = None
+                continue
             q = pos - self.phase
             godet = int(np.floor(q / self.P)) % self.N
             loop = int(max(np.floor(q / self.L) - (self.ident.loop_base or 0), 0) + self.ident.loop_offset)
@@ -205,16 +223,36 @@ class PlateTracker:
             d["score"] = score; d["cut"] = float(m[1]); d["out_of_line"] = float(m[2])
             one = float(1 / (1 + np.exp(-(((np.array([lg(p[0]), lg(p[1]), lg(p[2]), vrel]) - np.array(s["mu"]))
                                             / np.array(s["sd"])) @ np.array(s["w"]) + s["b"]))))
-            if one >= 0.75 * s["threshold"] and self.retain is not None:
-                ev = self.retain(col)                        # a frame that shows this plate, for the alert
-                if ev is not None:
-                    d["evidence"] = ev
             if len(d["passes"]) >= self.c["min_passes"] and score >= s["threshold"]:
                 if d["state"] != "confirmed":
                     d["state"] = "confirmed"; d["confirmed_loop"] = loop
                     self.counters["plate_godets_confirmed"] += 1
             elif d["state"] == "confirmed" and len(d["passes"]) >= 4 and score < 0.5 * s["threshold"]:
                 d["state"] = "healthy"                       # cleared (repaired)
+            if self.retain is not None:
+                have = godet in self.frames
+                stale = loop - d.get("ev_loop", loop) >= self.c["keep_passes"]
+                better = one >= 0.75 * s["threshold"] and (not have or stale or one >= d.get("ev_score", -1.0))
+                if better or (d["state"] == "confirmed" and not have):
+                    ev = self.retain(col)                    # the frame that shows this plate
+                    if ev is not None:
+                        frame = ev.pop("_frame", None)
+                        d["evidence"], d["ev_score"], d["ev_loop"] = ev, one, loop
+                        if frame is not None:
+                            self.frames[godet] = frame
+                            self._cap_frames()
+            e = d.get("evidence")
+            if (d["state"] == "confirmed" and self.resend is not None and e and godet in self.frames
+                    and d.get("sent") != e["frame_id"]):
+                self.resend(self.frames[godet])              # with the pipeline before the alert is reported
+                d["sent"] = e["frame_id"]
+
+    def _cap_frames(self):
+        if len(self.frames) <= MAX_FRAMES:
+            return
+        free = sorted((self.g[g].get("ev_score", 0.0), g) for g in self.frames if self.g[g]["state"] != "confirmed")
+        for _, g in free[:len(self.frames) - MAX_FRAMES]:
+            del self.frames[g]
 
     def damage_type(self, d):
         c, o = d.get("cut", 0) >= 0.5, d.get("out_of_line", 0) >= 0.5
@@ -229,10 +267,13 @@ class PlateTracker:
     def snapshot(self):
         with self.lock:
             return {"godets": {str(g): {k: (list(v) if k == "passes" else v) for k, v in d.items()} for g, d in self.g.items()},
-                    "counters": dict(self.counters)}
+                    "counters": dict(self.counters), "state_version": STATE_VERSION}
 
     def restore(self, snap):
+        if (snap or {}).get("state_version") != STATE_VERSION:
+            return                                           # older history: start fresh (see STATE_VERSION)
         for g, d in (snap or {}).get("godets", {}).items():
             d["passes"] = deque([tuple(x) for x in d.get("passes", [])], maxlen=self.c["keep_passes"])
+            d["sent"] = None                                 # the picture went with the old process
             self.g[int(g)] = d
         self.counters.update((snap or {}).get("counters", {}))
