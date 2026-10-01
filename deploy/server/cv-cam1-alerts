@@ -2,9 +2,16 @@
 # CAM-1 alerts vs the user's own judgements (2026-09-29 reviews, 357 godets: 94 damaged in the final
 # whole-chain check). Are live alerts on godets the user saw damaged, or on godets the user saw normal?
 #   bash deploy/server/cv-cam1-alerts [hours]     (default: alerts of the last 24 hours)
-source "$(dirname "${BASH_SOURCE[0]}")/cv-common.sh"
-step "CAM-1 alerts compared with your own judgements"
-python3 - "http://127.0.0.1:$(web_port)" "${1:-24}" <<'EOF2'
+# Standalone (works when downloaded to /tmp): the viewer port from the project's .env, else 8080.
+port=8080
+for env in "${CV_DIR:-}/.env" "$HOME/Projects/clinker-vision-/.env" /home/*/Projects/clinker-vision-/.env; do
+  p="$( [ -f "$env" ] && sed -n 's/^WEB_PORT=//p' "$env" | tail -1 | tr -d '' )"
+  [ -n "$p" ] && { port="$p"; break; }
+done
+printf '
+[1m== CAM-1 alerts compared with your own judgements[0m
+'
+python3 - "http://127.0.0.1:$port" "${1:-24}" <<'EOF2'
 import datetime as dt, json, sys, urllib.parse, urllib.request
 base, hours = sys.argv[1], float(sys.argv[2])
 LABELS = "3N 4N 9N 10N 12N 18N 33N 37N 43N 44B 45N 46N 47C 48N 50N 51C 52N 53N 55N 61N 62C 63C 64N 65C 66N 67C 68N 70N 71C 72N 74N 75C 76N 81N 82C 83C 84C 85C 86C 87C 88C 89N 92N 93O 94N 95N 96O 97N 100N 102N 103C 104N 107N 109N 110N 111O 112O 113O 114N 116N 117O 118N 120N 124N 125B 126N 134N 135N 149N 150N 155N 156O 157N 170N 171N 172O 173N 180N 187N 188N 191N 192O 193N 196N 199N 200N 203N 205N 209N 211N 213N 218N 219N 220C 221C 222C 223C 224N 225C 226C 227N 231N 232N 234N 235C 236N 238N 239C 240N 242N 249N 251N 270N 282N 283N 293N 295N 296O 297N 302N 308N 312N 316N 317O 318O 319N 320N 326N 333N 334N 336N 339N 342N 359N 360C 361N 368N 369N 371N 372C 373C 374N 375N 376C 377C 378C 379N 388N 389N 392N 393N 399N 400N 406N 407C 408N 409N 410N 411N 412O 413O 414N 415N 418N 422N 424N 428N 429N 436N 440N 445N 446B 447N 470N 476N 496N 497B 498N 500N 510N 511N 512B 513N 516N 520N 523N 528N 568N 571N 572B 573C 574N 583N 595N 596N 603N 621N 643N 644N 645B 646N 649N 650C 651N 653N 654N 655N 660N 669N 671N 672O 673O 674B 675N 680N 681B 682C 683N 696N 697N 704N 705B 706N 708N 717N 718N 719N 727N 734N 751N 752B 753B 754N 756N 757B 758B 759C 760N 761B 762B 763N 785N 786B 787N 789N 790O 791N 794N 795N 802N 803C 804C 805N 811N 815N 816O 817N 826N 829N 839N 858N 859B 860N 862N 864N 865N 871N 881N 883N 885N 892N 896N 897O 898N 905N 912N 913N 916N 917B 918C 919O 920N 930N 940N 944N 945N 947N 954N 963N 965N 973N 974O 975N 977N 988N 989N 990N 995N 996C 997C 998C 999N 1002N 1004N 1012N 1014N 1015B 1016N 1017N 1020N 1022N 1023N 1024O 1025O 1026N 1029N 1037N 1038N 1039N 1047N 1056N 1057B 1058O 1059N 1064N 1080N 1081N 1082N 1083N 1084N 1088N 1089N 1090O 1091N 1104N 1106N 1122N 1130N 1139N 1146N 1154N 1155O 1156N 1166N 1167O 1168N 1173N 1175N 1176C 1177N 1178C 1179C 1180N 1185N 1186C 1187C 1188N"
@@ -16,7 +23,10 @@ items, cursor = [], None
 while True:
     q = {"camera_id": "CAM-1", "limit": "200"}
     if cursor: q["cursor"] = cursor
-    d = json.load(urllib.request.urlopen(base + "/api/v1/alerts?" + urllib.parse.urlencode(q), timeout=10))
+    try:
+        d = json.load(urllib.request.urlopen(base + "/api/v1/alerts?" + urllib.parse.urlencode(q), timeout=10))
+    except OSError as e:
+        sys.exit("The viewer does not answer at %s (%s). Is Clinker Vision running? Check with the Status icon." % (base, e))
     items += d.get("items") or []
     cursor = d.get("next_cursor")
     if not cursor: break
@@ -50,4 +60,3 @@ def show(title, rs):
 show("Alerts on godets YOU saw NORMAL (send a photo of this list):", nor)
 show("Alerts on godets you never looked at:", unl)
 EOF2
-pause_if_icon
