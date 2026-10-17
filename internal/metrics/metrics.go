@@ -14,6 +14,9 @@ type Metrics struct {
 	InferenceRequests  atomic.Uint64
 	AlertsCreated      atomic.Uint64
 	AlertsDroppedCap   atomic.Uint64
+	AlertsExpired      atomic.Uint64
+	RetentionRuns      atomic.Uint64
+	RetentionFailures  atomic.Uint64
 	DependencyFailures atomic.Uint64
 }
 
@@ -31,6 +34,9 @@ func (m *Metrics) Handler(w http.ResponseWriter, _ *http.Request) {
 	writeCounter(w, "clinker_vision_inference_requests_total", "Inference requests sent to the model service.", m.InferenceRequests.Load())
 	writeCounter(w, "clinker_vision_alerts_created_total", "Alerts created for qualifying detections.", m.AlertsCreated.Load())
 	writeCounter(w, "clinker_vision_alerts_dropped_cap_total", "Alert events dropped because the storage cap was reached.", m.AlertsDroppedCap.Load())
+	writeCounter(w, "clinker_vision_alerts_expired_total", "Alerts deleted by time-based retention (rows + evidence).", m.AlertsExpired.Load())
+	writeCounter(w, "clinker_vision_retention_runs_total", "Retention janitor runs completed.", m.RetentionRuns.Load())
+	writeCounter(w, "clinker_vision_retention_failures_total", "Retention janitor runs that failed.", m.RetentionFailures.Load())
 	writeCounter(w, "clinker_vision_dependency_failures_total", "Required dependency failures observed.", m.DependencyFailures.Load())
 }
 

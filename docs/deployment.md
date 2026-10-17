@@ -166,7 +166,7 @@ The pipeline database migration preserves the old MVP alerts and makes
 confidence nullable for the v2 model. Keep the SQLite database and `evidence/`
 directory together when backing up or restoring.
 
-## Night run (20:00–04:00 Casablanca, 1000-alert cap)
+## Night run (20:00–04:00 Casablanca, 30-day retention)
 
 `config/config.yaml` carries the night-run shape:
 
@@ -177,8 +177,8 @@ schedule:
   stop: "04:00"
   timezone: "Africa/Casablanca"
 retention:
-  days: 365
-  max_alerts: 1000
+  days: 30
+  max_alerts: 0
 ```
 
 Behavior: the process stays up around the clock (HTTP + viewer always live),
@@ -202,7 +202,18 @@ go run ./cmd/night-report -db data/alerts.db -evidence evidence \
 At 1000 stored alerts the pipeline stops storing new keys (pending→confirmed
 upserts of known keys still go through) and counts every drop
 (`clinker_vision_alerts_dropped_cap_total`, warn log, `storage cap reached`
-in status detail). The cap resets only by manual wipe after the dawn review:
+in status detail). That global ever-growing cap blinded the system from day one
+(2026-10): all 1000 rows since the last wipe counted, across every camera, until
+a manual wipe. It is now an emergency fuse only — keep `max_alerts: 0`
+(unlimited) and let time retention below bound storage.
+
+Storage is bounded by time, not by count: once at startup and then daily, the
+pipeline janitor deletes alert rows + evidence JPEGs older than
+`retention.days` (30) and VACUUMs the database so the file actually shrinks
+(`clinker_vision_alerts_expired_total`, `clinker_vision_retention_runs_total`,
+`retention cleanup finished` log). Reports (`*.stats.json`, `reports/*.md`) are
+tiny and are never pruned. A manual wipe is still available after a review
+(the delete is irreversible, back up first):
 
 ```bash
 docker compose down
@@ -255,7 +266,8 @@ alerts carry the camera prefix in their key (`CAM-4:DAMAGE:<godet>:<loop>`), a
 box on the fault spot, and `severity` / `passes_seen` instead of `lip`. At the
 end of each day window the pipeline writes `data/CAM-4-day-<date>.stats.json`
 and `data/reports/CAM-4-day-<date>.md`; CAM-1 keeps its `night-<date>` names.
-The 1000-alert cap is shared by both cameras.
+Storage is shared by all cameras and bounded by `retention.days` (30), not by
+count (`max_alerts: 0` = fuse off).
 
 CAM-4 godet numbers are the chain-map numbers used on the review pages
 (0–1209), except that godet 0 is reported as **1210** (the system treats 0 as

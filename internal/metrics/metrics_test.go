@@ -12,6 +12,9 @@ func TestHandlerExportsCounters(t *testing.T) {
 	m.FramesSampled.Add(3)
 	m.FrameDrops.Add(1)
 	m.DecodeFailures.Add(1)
+	m.AlertsExpired.Add(4)
+	m.RetentionRuns.Add(2)
+	m.RetentionFailures.Add(1)
 	recorder := httptest.NewRecorder()
 	m.Handler(recorder, httptest.NewRequest("GET", "/metrics", nil))
 
@@ -22,6 +25,9 @@ func TestHandlerExportsCounters(t *testing.T) {
 		"clinker_vision_frames_sampled_total 3",
 		"clinker_vision_frame_drops_total 1",
 		"clinker_vision_decode_failures_total 1",
+		"clinker_vision_alerts_expired_total 4",
+		"clinker_vision_retention_runs_total 2",
+		"clinker_vision_retention_failures_total 1",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics missing %q:\n%s", expected, body)

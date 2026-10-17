@@ -255,4 +255,4 @@ docker compose up -d
 - CAM-4 is calibrated on 2026-09-07 at 10:00 and 12:00 light. Early morning, late afternoon
   and cloudy days are untested: watch the status and the first alerts before widening the
   hours.
-- CAM-4 alerts count towards the same 1000-alert cap as CAM-1.
+- CAM-4 alerts share the same 30-day time retention as CAM-1 (no count cap).
