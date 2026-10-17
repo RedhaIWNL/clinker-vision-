@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -9,7 +12,11 @@ import (
 	"time"
 
 	"github.com/clinkervision/clinker-vision/internal/config"
+	"github.com/clinkervision/clinker-vision/internal/evidence"
 	"github.com/clinkervision/clinker-vision/internal/health"
+	"github.com/clinkervision/clinker-vision/internal/metrics"
+	"github.com/clinkervision/clinker-vision/internal/store"
+	"github.com/google/uuid"
 )
 
 func TestNightReportPaths(t *testing.T) {
@@ -125,4 +132,130 @@ func mustLoc(t *testing.T, name string) *time.Location {
 		t.Fatal(err)
 	}
 	return loc
+}
+
+func testRetentionStore(t *testing.T) (*store.Store, string) {
+	t.Helper()
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "data", "alerts.db")
+	evidenceRoot := filepath.Join(root, "evidence")
+	s, err := store.Open(context.Background(), dbPath, evidenceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, evidenceRoot
+}
+
+func testRetentionAlert(detected time.Time, eventKey string) store.Alert {
+	now := detected.UTC()
+	return store.Alert{
+		AlertID: uuid.NewString(), CapturedAt: now, DetectedAt: now, CreatedAt: now,
+		CameraID: "CAM-1", ObservationTarget: "godet", FaultType: "DAMAGE",
+		FrameID: uuid.NewString(), ModelVersion: "test-retention",
+		BoundingBox:      store.BoundingBox{X: 0.2, Y: 0.3, Width: 0.18, Height: 0.12},
+		EvidenceRef:      "2026/09/17/CAM-1/" + uuid.NewString() + ".jpg",
+		GodetID:          7,
+		AlertState:       "confirmed",
+		LoopNo:           3,
+		RuleID:           "DAMAGE",
+		EventKey:         eventKey,
+		MeasurementsJSON: `{"severity":2.1}`,
+	}
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// The old global 1000-cap blinded the system: with max_alerts=0 every new key
+// must pass, no matter how many rows exist.
+func TestGateStorageUnlimitedNeverCaps(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testRetentionStore(t)
+	cfg := config.Defaults()
+	cfg.Retention.MaxAlerts = 0
+	e := &laneEnv{cfg: cfg, store: s}
+	for i := 0; i < 3; i++ {
+		a := testRetentionAlert(time.Now().UTC(), "UNLIMITED:"+uuid.NewString())
+		if err := s.UpsertGodetAlert(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allow, upsert, err := e.gateStorage(ctx, "", "UNLIMITED:new-key")
+	if err != nil || !allow || upsert {
+		t.Fatalf("unlimited cap must allow new keys: allow=%v upsert=%v err=%v", allow, upsert, err)
+	}
+}
+
+// A positive max_alerts is an emergency fuse only: new keys stop, known-key
+// upserts (pending->confirmed) still pass.
+func TestGateStorageCappedStillAllowsUpserts(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testRetentionStore(t)
+	cfg := config.Defaults()
+	cfg.Retention.MaxAlerts = 1
+	e := &laneEnv{cfg: cfg, store: s}
+	known := testRetentionAlert(time.Now().UTC(), "FUSE:known")
+	if err := s.UpsertGodetAlert(ctx, known); err != nil {
+		t.Fatal(err)
+	}
+	if allow, _, _ := e.gateStorage(ctx, "", "FUSE:fresh"); allow {
+		t.Fatal("capped store must deny fresh keys at the cap")
+	}
+	if allow, upsert, _ := e.gateStorage(ctx, "", "FUSE:known"); !allow || !upsert {
+		t.Fatalf("capped store must allow known-key upserts: allow=%v upsert=%v", allow, upsert)
+	}
+	if allow, upsert, _ := e.gateStorage(ctx, "pending", "FUSE:fresh"); !allow || !upsert {
+		t.Fatalf("in-memory seen state must allow upserts: allow=%v upsert=%v", allow, upsert)
+	}
+}
+
+// 30-day retention: rows + JPEGs older than the cutoff go, recent rows stay,
+// metrics record the run. Reports are never touched by the janitor.
+func TestRunRetentionOnceDeletesOnlyExpired(t *testing.T) {
+	ctx := context.Background()
+	s, evidenceRoot := testRetentionStore(t)
+	oldAlert := testRetentionAlert(time.Now().UTC().AddDate(0, 0, -31), "RET:old")
+	newAlert := testRetentionAlert(time.Now().UTC().AddDate(0, 0, -5), "RET:new")
+	for _, a := range []store.Alert{oldAlert, newAlert} {
+		if err := evidence.WriteAtomic(evidenceRoot, a.EvidenceRef, []byte("fake-jpeg")); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertGodetAlert(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	meter := metrics.New()
+	deleted, err := runRetentionOnce(ctx, s, 30, testLogger(), meter)
+	if err != nil || deleted != 1 {
+		t.Fatalf("expected 1 deletion, got deleted=%d err=%v", deleted, err)
+	}
+	if n, _ := s.Count(ctx); n != 1 {
+		t.Fatalf("expected 1 row left, got %d", n)
+	}
+	if _, err := s.GetAlert(ctx, oldAlert.AlertID); err == nil {
+		t.Fatal("expired alert still readable")
+	}
+	if _, err := s.GetAlert(ctx, newAlert.AlertID); err != nil {
+		t.Fatalf("recent alert wrongly deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(evidenceRoot, oldAlert.EvidenceRef)); !os.IsNotExist(err) {
+		t.Fatalf("expired evidence still on disk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(evidenceRoot, newAlert.EvidenceRef)); err != nil {
+		t.Fatalf("recent evidence wrongly removed: %v", err)
+	}
+	if meter.AlertsExpired.Load() != 1 || meter.RetentionRuns.Load() != 1 {
+		t.Fatalf("metrics not recorded: expired=%d runs=%d",
+			meter.AlertsExpired.Load(), meter.RetentionRuns.Load())
+	}
+	// Second run is a no-op but still counts as a run.
+	deleted, err = runRetentionOnce(ctx, s, 30, testLogger(), meter)
+	if err != nil || deleted != 0 {
+		t.Fatalf("second run: deleted=%d err=%v", deleted, err)
+	}
+	if meter.RetentionRuns.Load() != 2 {
+		t.Fatalf("expected 2 runs, got %d", meter.RetentionRuns.Load())
+	}
 }

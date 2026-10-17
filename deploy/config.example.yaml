@@ -72,9 +72,16 @@ storage:
   jpeg_quality: 85
 
 retention:
-  days: 365
-  # Night-run shape: cap stored alerts; 0 = unlimited (default preserves current behavior).
-  max_alerts: 1000
+  # Time-based retention: alert rows + evidence JPEGs older than this many days
+  # are deleted daily by the pipeline janitor (steady-state storage).
+  # Reports (*.stats.json, reports/*.md) are tiny and are never pruned.
+  days: 30
+  # Emergency fuse only, NOT retention: 0 = unlimited (recommended: time retention
+  # above bounds storage). A positive value stops storing NEW event keys once the
+  # global COUNT(*) reaches it (pending->confirmed upserts of known keys still go
+  # through). The old 1000-cap blinded the system until a manual wipe; do not use
+  # a small cap as retention.
+  max_alerts: 0
 
 # Global operating window: cameras without their own `schedule` (CAM-1) only run
 # inside [start, stop) in the given timezone; wraps midnight (20:00-04:00 = night run).

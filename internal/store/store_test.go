@@ -76,6 +76,13 @@ func TestStoreCleanupRemovesOldAlertAndEvidence(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "evidence", alert.EvidenceRef)); !os.IsNotExist(err) {
 		t.Fatalf("expired evidence still exists: %v", err)
 	}
+	// Space reclaim must work after retention deletes and keep the DB usable.
+	if err := alertStore.Vacuum(ctx); err != nil {
+		t.Fatalf("vacuum failed: %v", err)
+	}
+	if count, err := alertStore.Count(ctx); err != nil || count != 0 {
+		t.Fatalf("count after vacuum=%d err=%v", count, err)
+	}
 }
 
 func TestStoreListAlertsFiltersOrdersAndPaginates(t *testing.T) {

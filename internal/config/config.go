@@ -25,7 +25,7 @@ const (
 	DefaultConfidenceThreshold           = 0.85
 	DefaultDependencyTimeoutSeconds      = 300
 	DefaultJPEGQuality                   = 85
-	DefaultRetentionDays                 = 365
+	DefaultRetentionDays                 = 30
 	DefaultModelAddress                  = "model:50051"
 	DefaultSQLitePath                    = "/srv/clinker-vision/data/alerts.db"
 	DefaultEvidencePath                  = "/srv/clinker-vision/evidence"

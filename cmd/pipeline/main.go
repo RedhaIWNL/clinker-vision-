@@ -829,6 +829,37 @@ func (e *laneEnv) finishWindow(camera config.CameraConfig, tracker *windowTracke
 	}
 }
 
+// retentionInterval is how often the janitor prunes expired alerts. Time-based
+// retention (not the max_alerts fuse) is what bounds storage: each run deletes
+// alert rows + evidence JPEGs older than retention.days, then VACUUMs so the
+// SQLite file actually shrinks. Reports (*.stats.json, reports/*.md) are never
+// touched.
+const retentionInterval = 24 * time.Hour
+
+// runRetentionOnce prunes one cutoff worth of expired alerts. It is never fatal:
+// a failure is returned for logging/metrics and retried on the next interval,
+// so a locked DB or full disk cannot kill the detection lanes.
+func runRetentionOnce(parent context.Context, alertStore *store.Store, retentionDays int, logger *slog.Logger, meter *metrics.Metrics) (int, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
+	defer cancel()
+	deleted, err := alertStore.CleanupBefore(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if deleted > 0 {
+		meter.AlertsExpired.Add(uint64(deleted))
+		if verr := alertStore.Vacuum(ctx); verr != nil {
+			// Rows are gone; only the file-size reclaim failed. Warn and keep going.
+			logger.Warn("retention vacuum failed", "component", "store", "reason", verr.Error())
+		}
+	}
+	meter.RetentionRuns.Add(1)
+	logger.Info("retention cleanup finished", "component", "store",
+		"retention_days", retentionDays, "deleted", deleted)
+	return deleted, nil
+}
+
 func main() {
 	configPath := flag.String("config", "/etc/clinker-vision/config.yaml", "path to the protected YAML configuration")
 	healthcheck := flag.Bool("healthcheck", false, "check the local liveness endpoint and exit")
@@ -936,12 +967,37 @@ func main() {
 	}
 	logger.Info("pipeline starting", "component", "pipeline",
 		"bind_address", cfg.Server.BindAddress, "web_port", cfg.Server.WebPort,
-		"camera_count", enabledCount, "schedule_enabled", cfg.Schedule.Enabled)
+		"camera_count", enabledCount, "schedule_enabled", cfg.Schedule.Enabled,
+		"retention_days", cfg.Retention.Days, "max_alerts", cfg.Retention.MaxAlerts)
+	retentionDays := cfg.Retention.Days
 	var supWG sync.WaitGroup
 	supWG.Add(1)
 	go func() {
 		defer supWG.Done()
 		env.supervise(runCtx)
+	}()
+	// Retention janitor: immediate prune on boot (a restarted box recovers
+	// steady-state at once), then daily. Shares runCtx so it stops with the lanes.
+	supWG.Add(1)
+	go func() {
+		defer supWG.Done()
+		if _, err := runRetentionOnce(runCtx, alertStore, retentionDays, logger, metricHandler); err != nil {
+			metricHandler.RetentionFailures.Add(1)
+			logger.Warn("retention cleanup failed", "component", "store", "reason", err.Error())
+		}
+		ticker := time.NewTicker(retentionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := runRetentionOnce(runCtx, alertStore, retentionDays, logger, metricHandler); err != nil {
+					metricHandler.RetentionFailures.Add(1)
+					logger.Warn("retention cleanup failed", "component", "store", "reason", err.Error())
+				}
+			}
+		}
 	}()
 
 	serverErrors := make(chan error, 1)

@@ -444,6 +444,17 @@ func (s *Store) CleanupBefore(ctx context.Context, cutoff time.Time) (int, error
 	return int(deleted), nil
 }
 
+// Vacuum reclaims file space after retention deletes. SQLite DELETEs leave the
+// file size unchanged until VACUUM runs; without it a 30-day rolling retention
+// would hold a forever-grown file. Runs with the caller's context (janitor uses
+// a 60s timeout) and never touches reports/stats sidecars.
+func (s *Store) Vacuum(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("vacuum alerts database: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) validateAlert(alert Alert) error {
 	if _, err := uuid.Parse(alert.AlertID); err != nil {
 		return fmt.Errorf("alert_id must be a UUID: %w", err)
