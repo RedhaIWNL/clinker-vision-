@@ -26,6 +26,7 @@ LOCAL_WINDOW = 3000         # locked search: +- columns around the prediction
 LOCAL_MIN = 0.30            # locked acceptance (a small window rarely matches by chance)
 LOCK_AGREE = 300            # two unlocked pieces must agree this closely to lock
 LOST_COLS = 60000           # locked but no confirmed piece for this long -> resync
+AGREE_REJECTS = 3           # consecutive rejected anchors that agree with each other: a real drift, accepted
 MIN_POPULATION = 300        # passes needed before relative scores mean anything
 STD_ALPHA = 1.0 / 20000     # running per-channel scale of the fingerprint
 
@@ -49,6 +50,13 @@ class Cam4Identity:
         self.phase = float(idn["phase"]); self.n = int(idn["godets"])
         self.piece, self.step = int(idn["piece"]), int(idn["step"])
         self.min_match = float(idn["min_match"])
+        # New Camera 1 (2026-10-01): a locked match must land where the odometer predicts. A weak match
+        # (>= 0.30 in a +-3000 px window) one godet off moved every plate around it to its neighbour's
+        # number (live, in daylight: 35 of 47 alerts on normal godets sat next to a damaged one).
+        # None = accept as before (CAM-3, CAM-4). A real drift: AGREE_REJECTS rejected matches in a row
+        # that agree with each other are accepted.
+        self.anchor_tol = idn.get("anchor_tol")
+        self.rejected = deque(maxlen=AGREE_REJECTS)
         # Camera 3's strip stretches by up to +-6 % (its odometer reading drifts): pieces are matched at
         # several scales and the odometer-to-map scale may drift further. CAM-4: one scale, +-2 %.
         self.scales = tuple(idn.get("scales", (1.0,)))
@@ -68,7 +76,8 @@ class Cam4Identity:
         self.cur = None               # current pass accumulator
         self.sinks = []
         self.counters = {"pieces_total": 0, "anchors_total": 0, "locks_total": 0,
-                         "lock_losses_total": 0, "passes_total": 0}
+                         "lock_losses_total": 0, "passes_total": 0, "anchors_rejected_total": 0,
+                         "anchors_drift_total": 0}
 
     def subscribe(self, fn):
         self.sinks.append(fn)
@@ -166,6 +175,16 @@ class Cam4Identity:
             q, kc = self._match(seg, piece)
         if q >= LOCAL_MIN:
             pos = lo + kc                                      # unwrapped, near pred
+            if self.anchor_tol is not None and abs(pos - pred) > float(self.anchor_tol):
+                self.counters["anchors_rejected_total"] = self.counters.get("anchors_rejected_total", 0) + 1
+                self.rejected.append(pos - pred)
+                agree = (len(self.rejected) == AGREE_REJECTS
+                         and max(self.rejected) - min(self.rejected) <= float(self.anchor_tol))
+                if not agree:
+                    self._map_pending(centre)
+                    return
+                self.counters["anchors_drift_total"] = self.counters.get("anchors_drift_total", 0) + 1
+            self.rejected.clear()
             self.anchors.append((centre, float(pos)))
             self.counters["anchors_total"] += 1
         elif centre - self.anchors[-1][0] > LOST_COLS:

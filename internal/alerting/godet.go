@@ -133,9 +133,13 @@ func processGodetEvent(ctx context.Context, state *inferencev2.GodetStateRespons
 	for key, value := range event.GetMeasurements() {
 		measurementValues[key] = value
 	}
+	_, plateEvent := event.GetMeasurements()["damage_type"] // new CAM-1: plate damage (cut / out of line)
 	switch {
 	case kind.target == "galet":
 		// wheel events carry their own measurements (first/last godet, godets, wheels)
+	case plateEvent:
+		// new CAM-1 plate events carry their own measurements (score, cut, out of line, type); the old
+		// CAM-1 "lip" fields made the page describe the box as the old fixed region (2026-10-01)
 	case frame.CameraID == "CAM-3" || frame.CameraID == "CAM-4": // side-plate damage
 		measurementValues["severity"] = godet.GetSeverity()
 		measurementValues["passes_seen"] = godet.GetPassesSeen()

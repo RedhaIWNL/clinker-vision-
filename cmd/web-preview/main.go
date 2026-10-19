@@ -131,9 +131,9 @@ func main() {
 	api := web.NewAPI(alertStore, evidenceRoot)
 	api.SettingsPath = filepath.Join(root, "settings.json")
 	api.Cameras = []web.CameraInfo{
-		{ID: "CAM-1", ConfigHours: web.CameraHours{Mode: "hours", Start: "16:00", Stop: "09:00"}},
-		{ID: "CAM-3", ConfigHours: web.CameraHours{Mode: "hours", Start: "09:00", Stop: "12:30"}},
-		{ID: "CAM-4", ConfigHours: web.CameraHours{Mode: "hours", Start: "12:30", Stop: "16:00"}},
+		{ID: "CAM-1", DefaultHours: web.DefaultCameraHours["CAM-1"]},
+		{ID: "CAM-3", DefaultHours: web.DefaultCameraHours["CAM-3"]},
+		{ID: "CAM-4", DefaultHours: web.DefaultCameraHours["CAM-4"]},
 	}
 	server := &http.Server{
 		Addr:              "127.0.0.1:8080",

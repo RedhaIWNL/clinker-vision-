@@ -312,3 +312,30 @@ func TestSidePlateEventWithoutBoxGetsNoOldFixedBox(t *testing.T) {
 		t.Fatalf("box = %+v, want the whole frame (not the old fixed CAM-1 box)", b)
 	}
 }
+
+func TestPlateEventKeepsItsOwnMeasurements(t *testing.T) {
+	// 2026-10-01: new CAM-1 plate alerts got the old CAM-1 "lip" fields, and the page then described the
+	// box as "fixed inspection region of the old Camera 1 view".
+	root := t.TempDir()
+	alertStore := openProcessorStore(t, root)
+	live := processorFrame()
+	live.CameraID = "CAM-1"
+	g := &inferencev2.GodetState{GodetId: 44, State: "confirmed", LastSeenLoop: 2}
+	e := &inferencev2.GodetAlertEvent{EventKey: "CAM-1:DAMAGE:44:2", Kind: "damage", GodetId: 44, LoopNo: 2, State: "confirmed",
+		EvidenceFrameId: live.FrameID, EvidenceBox: &inferencev2.BoundingBox{X: 0.4, Y: 0.5, Width: 0.1, Height: 0.2},
+		Measurements: map[string]float64{"severity": 0.9, "cut": 0.8, "out_of_line": 0.1, "damage_type": 1}}
+	if _, err := ProcessGodetState(context.Background(), &inferencev2.GodetStateResponse{ModelVersion: "m1", Godets: []*inferencev2.GodetState{g}, Events: []*inferencev2.GodetAlertEvent{e}, Health: &inferencev2.Health{}}, live, 85, filepath.Join(root, "evidence"), alertStore, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := alertStore.ListAlerts(context.Background(), store.ListFilter{Limit: 10})
+	if len(list.Alerts) != 1 {
+		t.Fatalf("alerts = %#v", list.Alerts)
+	}
+	m := list.Alerts[0].MeasurementsJSON
+	if bytes.Contains([]byte(m), []byte(`"lip"`)) || !bytes.Contains([]byte(m), []byte(`"severity":0.9`)) || bytes.Contains([]byte(m), []byte(`latest_frame`)) {
+		t.Fatalf("measurements = %s", m)
+	}
+	if b := list.Alerts[0].BoundingBox; b.X != 0.4 || b.Height != 0.2 {
+		t.Fatalf("box = %+v, want the judged plate", b)
+	}
+}

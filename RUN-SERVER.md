@@ -79,13 +79,17 @@ sets CAM-3 09:00-12:30, CAM-4 12:30-16:00, CAM-1 16:00-09:00 (backup of the sett
 and restarts the pipeline. **Repair** warns when hours overlap. If frames are lost anyway, Status says
 `CAMERA STREAM LOSING FRAMES` (not "conveyor stopped").
 
-**Easier (from version 2026.10.01): the Viewer's *Camera hours* box** (left column, below the godet
-number). For each camera: *Default* (the hours above, from `config.yaml`), *These hours* (start / stop,
-may pass midnight), *Always on* or *Off*. **Save hours**: cameras start or stop within 15 seconds, no
-restart, nothing to type in a terminal. The box warns when two cameras' hours overlap. *Default* again
-returns a camera to its `config.yaml` hours. Only cameras enabled in `config.yaml` are listed.
-Example, to try CAM-1 now: CAM-1 *Always on*, CAM-3 and CAM-4 *Off*; afterwards all three back to
-*Default*.
+**Easier: the Viewer's *Camera hours* box** (left column, below the godet number). For each camera:
+*Default*, *These hours* (start / stop, may pass midnight), *Always on* or *Off*. **Save hours**:
+cameras start or stop within 15 seconds, no restart, nothing to type in a terminal. The box warns when
+two cameras' hours overlap.
+
+*Default* (from the version after 2026.10.01) = one camera at a time, built into the system:
+CAM-3 09:00-12:30, CAM-4 12:30-16:00, CAM-1 16:00-08:00 (CAM-1 was checked on night, 17:00 and 07:00
+light only). It replaces the hours in `config.yaml` for these three cameras (the server's file still
+had CAM-1 06:01-06:00 and CAM-3 / CAM-4 09:00-16:00, i.e. all three at once). A camera that is not set
+on the page follows *Default*. To try one camera now: it *Always on*, the others *Off*; afterwards all
+back to *Default*.
 
 ## Wheel alert limits
 
